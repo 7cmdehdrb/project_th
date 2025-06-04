@@ -1,0 +1,12 @@
+{
+    "python.analysis.extraPaths": [
+        "./install/custom_msgs/local/lib/python3.10/dist-packages",
+        "./install/base_package/lib/python3.10/site-packages",
+        "./install/path_planner/lib/python3.10/site-packages"
+    ],
+    "python.autoComplete.extraPaths": [
+        "./install/custom_msgs/local/lib/python3.10/dist-packages",
+        "./install/base_package/lib/python3.10/site-packages",
+        "./install/path_planner/lib/python3.10/site-packages"
+    ],
+}

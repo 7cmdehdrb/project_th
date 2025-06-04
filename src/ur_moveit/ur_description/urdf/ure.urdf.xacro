@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="$(arg name)">
+
+
+	<include filename="$(find ur_description)/urdf/ur.urdf.xacro">
+  </include>
+
+	<include filename="$(find robotiq_description)/urdf/gripper_macro.xacro" />
+</robot>
