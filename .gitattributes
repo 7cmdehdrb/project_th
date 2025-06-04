@@ -1,0 +1,10 @@
+# 추적하지 않을 언어 형식 설정
+
+# HTML 파일은 추적하지 않음
+*.html linguist-detectable=false 
+
+# Jupyter Notebook 파일은 추적하지 않음
+*.ipynb linguist-detectable=false 
+
+# 특정 파일은 추적하지 않음 (Libraries)
+# src/web_interaction/web_interaction/roslib.js linguist-detectable=false 
