@@ -20,6 +20,8 @@ find_package(sensor_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   # ADD YOUR CUSTOM MESSAGES HERE
   "msg/TEST.msg"
+  "msg/BoundingBox.msg"
+  "msg/BoundingBoxMultiArray.msg"
   DEPENDENCIES std_msgs geometry_msgs nav_msgs sensor_msgs
 )
 
