@@ -14,6 +14,7 @@ import cv2
 
 # NumPy
 import numpy as np
+import rotutils
 
 # ROS2
 import rclpy
@@ -81,6 +82,9 @@ class MegaPoseClient(object):
             self._camera_info_callback,
             qos_profile=qos_profile_system_default,
         )
+        self._camera_info: CameraInfo = (
+            None  # CameraInfo message to store camera intrinsics
+        )
         # <<< ROS2 <<<
 
         # >>> Data >>>
@@ -89,6 +93,7 @@ class MegaPoseClient(object):
         )
         self._image_size = (480, 640)  # Default image size (height, width)
         self._avilable_objects = self._send_list_objects_request()
+
         # <<< Data <<<
 
     @property
@@ -97,6 +102,13 @@ class MegaPoseClient(object):
         Returns whether the client is configured with camera intrinsics.
         """
         return self._is_configured
+
+    @property
+    def camera_info(self) -> CameraInfo:
+        """
+        Returns the CameraInfo message containing camera intrinsics.
+        """
+        return self._camera_info
 
     def _camera_info_callback(self, msg: CameraInfo):
         if self._is_configured is True:
@@ -119,6 +131,9 @@ class MegaPoseClient(object):
 
         if response:
             self._node.get_logger().info("Set intrinsics successfully.")
+
+            self._camera_info = msg
+
             self._is_configured = True
 
     def _send_intrinsics_request(self, K: np.ndarray, image_size: tuple):
@@ -303,6 +318,9 @@ class MegaPoseNode(Node):
 
         self._target_object = kwargs.get("target_object", None)
         self._refiner_iterations = kwargs.get("refiner_iterations", 1)
+        self._score_threshold = kwargs.get(
+            "score_threshold", 0.8
+        )  # Threshold for score to consider tracking successful
 
         # >>> MegaPose Client Initialization >>>
 
@@ -342,6 +360,21 @@ class MegaPoseNode(Node):
         )
         self._image: Image = None
 
+        # >>> Pose Publisher >>>
+        self._pose_publisher = self.create_publisher(
+            PoseStamped,
+            self.get_name() + "/pose",
+            qos_profile=qos_profile_system_default,
+        )
+
+    def run(self):
+        """
+        Main loop for the MegaPose client node.
+        This method will be called to start the node's functionality.
+        """
+        # Call the current status method
+        self._methods[self._status]()
+
     def _bbox_callback(self, msg: BoundingBoxMultiArray):
         self._bbox = msg
 
@@ -372,7 +405,7 @@ class MegaPoseNode(Node):
             return None
 
         # If the score is above a threshold, update the status to TRACKING
-        if response["score"] > 0.8:
+        if float(response["score"]) > self._score_threshold:
             self.get_logger().info(
                 f"Initial cTos for '{self._target_object}' received successfully."
             )
@@ -394,14 +427,6 @@ class MegaPoseNode(Node):
             )
             return None
 
-    def run(self):
-        """
-        Main loop for the MegaPose client node.
-        This method will be called to start the node's functionality.
-        """
-        # Call the current status method
-        self._methods[self._status]()
-
     def _update_status(self) -> MegaPoseClientStatus:
         """
         Set the current status of the MegaPose client.
@@ -417,6 +442,35 @@ class MegaPoseNode(Node):
 
         return self._status
 
+    def _get_pose_stamped(self, cTo: np.ndarray) -> PoseStamped:
+        """
+        Convert the camera-to-object transformation matrix to a PoseStamped message.
+        """
+        # STEP 1: Check if cTo is a valid 4x4 matrix
+        assert cTo.shape == (4, 4), "cTo must be a 4x4 matrix."
+
+        # STEP 2: Transform frame from realsense to ros
+        cTo = rotutils.transform_realsense_to_ros(cTo)
+
+        translation, rotation = rotutils.decompose_transform(cTo)
+        quaternion = rotutils.quaternion_from_rotation_matrix(rotation)
+
+        pose_stamped = PoseStamped(
+            header=Header(
+                frame_id=self._megapose_client.camera_info.header.frame_id,  # Make sure to use the correct frame_id
+                stamp=self.get_clock().now().to_msg(),
+            ),
+            pose=Pose(
+                position=Point(**dict(zip(["x", "y", "z"], translation))),
+                orientation=Quaternion(
+                    **dict(zip(["x", "y", "z", "w"], quaternion)),
+                ),
+            ),
+        )
+
+        return pose_stamped
+
+    # >>> State Methods >>>
     def _not_configured(self):
         """
         Not configured state: Waiting for camera intrinsics to be set, image to be received, and bounding box to be available.
@@ -519,6 +573,13 @@ class MegaPoseNode(Node):
             self._update_status()
             return None
 
+        else:
+            cTo = np.array(result["cTo"]).reshape(4, 4)
+
+            pose_stamped = self._get_pose_stamped(cTo)
+
+            self._pose_publisher.publish(pose_stamped)
+
     def _lost(self):
         """
         Lost state: Object lost, trying to reinitialize tracking.
@@ -558,6 +619,14 @@ def main(args=None):
         default=1,
         help="(Optional) Number of iterations for the refiner. Default is 1",
     )
+    parser.add_argument(
+        "--score_threshold",
+        type=float,
+        required=False,
+        default=0.8,
+        help="(Optional) Threshold for score to consider tracking successful. Default is 0.8",
+    )
+
     parser.add_argument(
         "--target_object",
         type=str,

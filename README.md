@@ -7,6 +7,9 @@ RESTART
 ros2 control switch_controllers --activate scaled_joint_trajectory_controller --deactivate forward_position_controller
 ```
 
+ros2 control switch_controllers --activate forward_velocity_controller --deactivate scaled_joint_trajectory_controller
+
+
 ```bash
 ros2 service call /servo_node/start_servo std_srvs/srv/Trigger
 ```
