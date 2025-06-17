@@ -51,78 +51,171 @@ class TestNode(Node):
         )
         self._joint_states: JointState = None
 
+        self._cnt = 0
+
     def _joint_state_callback(self, msg: JointState):
         self._joint_states = msg
-
-    def _generate_velocity_profile(self, p0, p1, v0, v1, T, num_points=10):
-        """
-        보간된 속도 함수 v(t)를 생성.
-        - p0, p1: 시작/종료 위치
-        - v0, v1: 시작/종료 속도
-        - T: 총 시간
-        - 반환: 시간 배열 t, 속도 배열 v, 위치 배열 p (적분값)
-        """
-        dp = p1 - p0
-
-        d = v0
-        A = np.array([[T**3, T**2, T], [T**4 / 4, T**3 / 3, T**2 / 2]])
-        b_vec = np.array([v1 - v0, dp - v0 * T])
-
-        coeffs = np.linalg.lstsq(A, b_vec, rcond=None)[0]  # a, b, c
-        a, b_, c = coeffs
-
-        # t grid
-        t = np.linspace(0, T, num_points)
-        v = a * t**3 + b_ * t**2 + c * t + d
-
-        return t, v
 
     def run2(self):
         if self._joint_states is None:
             return
 
-        current_joint = self._joint_states.position
-        target_joint = [
-            current_joint[0] + np.deg2rad(10.0) / 10.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ]
+        if self._cnt > 2:
+            return
 
-        current_velocity = self._joint_states.velocity
-        target_velocity = [
-            np.deg2rad(10.0),
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ]
+        msg = JointTrajectory()
 
-        ts = []
-        vs = []
+        msg.header = Header(stamp=self.get_clock().now().to_msg())
+        msg.joint_names = self._joint_states.name
 
-        # Generate velocity profile for each joint
-        ts, vs = self._generate_velocity_profile(
-            p0=cj, p1=tj, v0=cv, v1=tv, T=0.1, num_points=10
-        )
+        joint_states = self._joint_states
 
-        print("Time steps:", ts[0], ts[-1])
-        print("Velocities:", vs[0], vs[-1])
+        if self._cnt % 2 == 0:
+            print("Even count, using joint trajectory points with position changes")
+            msg.points = [
+                # JointTrajectoryPoint(
+                #     positions=self._joint_states.position,
+                #     velocities=self._joint_states.velocity,
+                #     time_from_start=BuiltinDuration(sec=0, nanosec=0),
+                # ),
+                JointTrajectoryPoint(
+                    positions=[
+                        joint_states.position[0],
+                        joint_states.position[1],
+                        joint_states.position[2],
+                        joint_states.position[3],
+                        joint_states.position[4],
+                        joint_states.position[5]
+                        + (
+                            np.deg2rad(5) * 0.01
+                        ),  # After 0.1 seconds, move the last joint by 10 degrees
+                    ],
+                    velocities=[
+                        joint_states.velocity[0],
+                        joint_states.velocity[1],
+                        joint_states.velocity[2],
+                        joint_states.velocity[3],
+                        joint_states.velocity[4],
+                        np.deg2rad(5),
+                    ],
+                    time_from_start=BuiltinDuration(sec=0, nanosec=int(1e9 * 0.01)),
+                ),
+                JointTrajectoryPoint(
+                    positions=[
+                        joint_states.position[0],
+                        joint_states.position[1],
+                        joint_states.position[2],
+                        joint_states.position[3],
+                        joint_states.position[4],
+                        joint_states.position[5]
+                        + (
+                            np.deg2rad(5) * 0.1
+                        ),  # After 0.1 seconds, move the last joint by 10 degrees
+                    ],
+                    velocities=[
+                        joint_states.velocity[0],
+                        joint_states.velocity[1],
+                        joint_states.velocity[2],
+                        joint_states.velocity[3],
+                        joint_states.velocity[4],
+                        np.deg2rad(5),
+                    ],
+                    time_from_start=BuiltinDuration(sec=0, nanosec=int(1e9 * 0.1)),
+                ),
+                JointTrajectoryPoint(
+                    positions=[
+                        joint_states.position[0],
+                        joint_states.position[1],
+                        joint_states.position[2],
+                        joint_states.position[3],
+                        joint_states.position[4],
+                        joint_states.position[5]
+                        + (np.deg2rad(5) * 0.1 * 5.0),  # After 0.5 seconds
+                    ],
+                    velocities=[
+                        joint_states.velocity[0],
+                        joint_states.velocity[1],
+                        joint_states.velocity[2],
+                        joint_states.velocity[3],
+                        joint_states.velocity[4],
+                        np.deg2rad(5),
+                    ],
+                    time_from_start=BuiltinDuration(sec=0, nanosec=int(1e9 * 0.5)),
+                ),
+                JointTrajectoryPoint(
+                    positions=[
+                        joint_states.position[0],
+                        joint_states.position[1],
+                        joint_states.position[2],
+                        joint_states.position[3],
+                        joint_states.position[4],
+                        joint_states.position[5]
+                        + np.deg2rad(5) * 0.1 * 10.0,  # After 0.5 seconds
+                    ],
+                    velocities=[0.0] * 6,
+                    time_from_start=BuiltinDuration(sec=1, nanosec=0),
+                ),
+            ]
 
-        print(target_velocity)
+        else:
+            msg.points = [
+                # JointTrajectoryPoint(
+                #     positions=[
+                #         self._joint_states.position[0],
+                #         self._joint_states.position[1],
+                #         self._joint_states.position[2],
+                #         self._joint_states.position[3],
+                #         self._joint_states.position[4],
+                #         self._joint_states.position[5],
+                #     ],
+                #     velocities=self._joint_states.velocity,
+                #     time_from_start=BuiltinDuration(sec=0, nanosec=0),
+                # ),
+                JointTrajectoryPoint(
+                    positions=[
+                        self._joint_states.position[0],
+                        self._joint_states.position[1],
+                        self._joint_states.position[2],
+                        self._joint_states.position[3],
+                        self._joint_states.position[4] + np.deg2rad(10) / 10.0,
+                        self._joint_states.position[5],
+                    ],
+                    velocities=[
+                        self._joint_states.velocity[0],
+                        self._joint_states.velocity[1],
+                        self._joint_states.velocity[2],
+                        self._joint_states.velocity[3],
+                        np.deg2rad(10),
+                        self._joint_states.velocity[5],
+                    ],
+                    time_from_start=BuiltinDuration(sec=1),
+                ),
+                JointTrajectoryPoint(
+                    positions=[
+                        self._joint_states.position[0],
+                        self._joint_states.position[1],
+                        self._joint_states.position[2],
+                        self._joint_states.position[3],
+                        self._joint_states.position[4] + np.deg2rad(10) / 10.0 * 2.0,
+                        self._joint_states.position[5],
+                    ],
+                    velocities=[
+                        self._joint_states.velocity[0],
+                        self._joint_states.velocity[1],
+                        self._joint_states.velocity[2],
+                        self._joint_states.velocity[3],
+                        np.deg2rad(10),
+                        self._joint_states.velocity[5],
+                    ],
+                    time_from_start=BuiltinDuration(sec=2),
+                ),
+            ]
 
-        data = Float64MultiArray()
+        print("Publishing JointTrajectory message", np.deg2rad(5))
 
-        data.data = [
-            np.random.uniform(-0.2, 0.2) for _ in range(len(self._joint_states.name))
-        ]
+        # self._cnt += 1
 
-        # print(data)
-
-        # self._pub3.publish(data)
+        self._pub2.publish(msg)
 
 
 def main():
