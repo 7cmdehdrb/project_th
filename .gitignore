@@ -378,5 +378,5 @@ AMENT_IGNORE
 install/
 log/
 
-**/resource/
+# **/resource/
 **/meshes

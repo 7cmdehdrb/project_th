@@ -1,0 +1,19 @@
+[submodule "src/ur_moveit/moveit2"]
+	path = src/ur_moveit/moveit2
+	url = https://github.com/7cmdehdrb/moveit2.git
+[submodule "src/ur_moveit/moveit_msgs"]
+	path = src/ur_moveit/moveit_msgs
+	url = https://github.com/moveit/moveit_msgs.git
+	branch = humble
+[submodule "src/ur_moveit/moveit_resources"]
+	path = src/ur_moveit/moveit_resources
+	url = https://github.com/7cmdehdrb/moveit_resources.git
+	branch = humble
+[submodule "src/ur_moveit/Universal_Robots_ROS2_Driver"]
+	path = src/ur_moveit/Universal_Robots_ROS2_Driver
+	url = https://github.com/7cmdehdrb/Universal_Robots_ROS2_Driver.git
+	branch = humble
+[submodule "src/ur_moveit/ur_description"]
+	path = src/ur_moveit/ur_description
+	url = https://github.com/7cmdehdrb/Universal_Robots_ROS2_Description.git
+	branch = humble

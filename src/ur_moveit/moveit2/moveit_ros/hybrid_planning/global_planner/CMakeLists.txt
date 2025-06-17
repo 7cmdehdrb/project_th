@@ -1,2 +1,0 @@
-add_subdirectory(global_planner_component)
-add_subdirectory(global_planner_plugins)

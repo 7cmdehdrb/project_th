@@ -1,2 +1,0 @@
-add_subdirectory(hybrid_planning_manager_component)
-add_subdirectory(planner_logic_plugins)
