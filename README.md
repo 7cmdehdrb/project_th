@@ -36,7 +36,7 @@ ros2 launch realsense2_camera rs_launch.py camera_name:="camera1" pointcloud.ena
 ## 1-1. Launch Side Camera
 
 ```bash
-ros2 launch realsense2_camera rs_launch.py camera_name:="camera1" pointcloud.enable:=true rgb_camera.color_profile:="640,480,30" depth_module.depth_profile:="640,480,30" rgb_camera.enable_auto_exposure:=false rgb_camera.exposure:="100" usb_port_id:="6-1.3"
+ros2 launch realsense2_camera rs_launch.py camera_name:="camera2" pointcloud.enable:=true rgb_camera.color_profile:="640,480,30" depth_module.depth_profile:="640,480,30" rgb_camera.enable_auto_exposure:=false rgb_camera.exposure:="100" usb_port_id:="6-1.3"
 ```
 
 ## 2. Launch UR Bringup
@@ -62,3 +62,12 @@ python3 /home/irol/workspace/project_th/src/object_tracker/object_tracker/real_t
 ```bash
 python3 /home/irol/workspace/project_th/src/object_tracker/object_tracker/megapose_client.py --refiner_iterations 1 --score_threshold 0.2 --target_object alive
 ```
+
+# TF
+
+```bash
+ros2 run tf2_ros static_transform_publisher -0.2575 -0.2725 0.46 0.0 0.0 0.0 0.1 world camera1_joint1
+```
+
+```bash
+ros2 run tf2_ros static_transform_publisher 0.05 0.0 0.0 0.0 0.0 0.258819 0.9659258  camera1_joint1 camera1_link```

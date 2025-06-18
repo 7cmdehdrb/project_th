@@ -19,6 +19,7 @@ from tf2_ros import *
 # Python
 import numpy as np
 from typing import Tuple, Optional, List, Union, Any
+from base_package.manager import TransformManager
 
 
 class PoseManager:
@@ -216,9 +217,16 @@ class KalmanFilterNode(Node):
         self._state = KalmanFilterNode.KalmanState()
         self._pose_manager = PoseManager(node=self)
 
+        self._tf_manager = TransformManager(node=self)
+
         self._pose_publisher = self.create_publisher(
             PoseStamped,
             self.get_name() + "/pose",
+            qos_profile=qos_profile_system_default,
+        )
+        self._observation_publisher = self.create_publisher(
+            Float32MultiArray,
+            self.get_name() + "/observation",
             qos_profile=qos_profile_system_default,
         )
         self._status_subscriber = self.create_subscription(
@@ -255,6 +263,41 @@ class KalmanFilterNode(Node):
 
         self._pose_publisher.publish(msg)
 
+    def _publish_observation(self):
+        transformed_pose: PoseStamped = self._tf_manager.transform_pose(
+            PoseStamped(
+                header=Header(
+                    frame_id=self._pose_manager.frame_id,
+                    stamp=self.get_clock().now().to_msg(),
+                ),
+                pose=Pose(
+                    position=Point(
+                        x=self._state.x[0],
+                        y=self._state.x[1],
+                        z=0.0,  # TODO: Set the z-coordinate if needed
+                    ),
+                    orientation=Quaternion(
+                        x=0.0,  # TODO: Set the orientation if needed
+                        y=0.0,
+                        z=0.0,
+                        w=1.0,  # Default orientation (no rotation)
+                    ),
+                ),
+            ),
+            target_frame="world",
+            source_frame=self._pose_manager.frame_id,
+        )
+
+        if transformed_pose is not None:
+            observation_msg = Float32MultiArray(
+                data=[
+                    transformed_pose.pose.position.x,
+                    transformed_pose.pose.position.y,
+                    0.2549,
+                ]
+            )
+            self._observation_publisher.publish(observation_msg)
+
     def run(self):
         if self._pose_manager.last_time is None:
             self.get_logger().warn("No pose message received yet, skipping run.")
@@ -267,10 +310,15 @@ class KalmanFilterNode(Node):
         z = (
             self._pose_manager.z if self._megapose_status == 2 else None
         )  # Use the measurement if the time step is reasonable
-        _, _ = self._state.filter(z)
+        x, _ = self._state.filter(z)
+
+        self.get_logger().info(
+            f"KF: x={x[0]:.2f}, y={x[1]:.2f}, vx={x[2]:.2f}, vy={x[3]:.2f}"
+        )
 
         # 3. Publish the pose
         self._publish_pose()
+        self._publish_observation()
 
 
 def main():

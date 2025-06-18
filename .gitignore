@@ -380,3 +380,14 @@ log/
 
 # **/resource/
 **/meshes
+# Deep Learning Model files
+*.h5
+*.hdf5
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.tflite
+*.pb
+*.joblib
+*.pkl
