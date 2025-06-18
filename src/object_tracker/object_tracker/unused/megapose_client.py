@@ -35,7 +35,7 @@ from visualization_msgs.msg import *
 from tf2_ros import *
 
 # Custom Packages
-from base_package.manager import ImageManager, ObjectManager
+from base_package.manager import ImageManager
 
 
 class MegaPoseClient(object):
@@ -92,8 +92,6 @@ class MegaPoseClient(object):
             False  # Whether the client is configured with camera intrinsics
         )
         self._image_size = (480, 640)  # Default image size (height, width)
-        # self._image_size = (720, 1280)  # Default image size (height, width)
-
         self._avilable_objects = self._send_list_objects_request()
 
         # <<< Data <<<
@@ -151,21 +149,8 @@ class MegaPoseClient(object):
         u0, v0 = K[0, 2], K[1, 2]  # 주점 (principal point)
         h, w = image_size  # 이미지 높이, 너비
 
-        # "px": 605.146728515625,
-        # "py": 604.79150390625,
-        # "u0": 325.53253173828125,
-        # "v0": 244.95083618164063
-
         # JSON 데이터 생성
         intrinsics_data = {"px": px, "py": py, "u0": u0, "v0": v0, "h": h, "w": w}
-        # intrinsics_data = {
-        #     "px": 605.146728515625,
-        #     "py": 604.79150390625,
-        #     "u0": 325.53253173828125,
-        #     "v0": 244.95083618164063,
-        #     "h": h,
-        #     "w": w,
-        # }
 
         # JSON 직렬화
         json_str = json.dumps(intrinsics_data)
@@ -329,7 +314,7 @@ class MegaPoseClientStatus(Enum):
 
 class MegaPoseNode(Node):
     def __init__(self, *args, **kwargs):
-        super().__init__("megapose_client_node")
+        super().__init__("megapose_client_node", *args, **kwargs)
 
         self._target_object = kwargs.get("target_object", None)
         self._refiner_iterations = kwargs.get("refiner_iterations", 1)
@@ -349,17 +334,14 @@ class MegaPoseNode(Node):
 
         self._megapose_client = MegaPoseClient(self, *args, **kwargs)
         self._data = {
-            "cTo": [0.0] * 16,  # Initial camera-to-object transformation matrix
+            "cTo": np.eye(4, 4),  # Initial camera-to-object transformation matrix
             "score": 0.0,  # Initial score
         }
-
-        # >>> Object Manager >>>
-        self._object_manager = ObjectManager(node=self, *args, **kwargs)
 
         # >>> Bounding Box Subscriber >>>
         self._bbox_subscriber = self.create_subscription(
             BoundingBoxMultiArray,
-            "/real_time_segmentation_node/segmented_bbox",  # TODO: Set the correct topic name for bounding boxes
+            "",  # TODO: Set the correct topic name for bounding boxes
             self._bbox_callback,
             qos_profile=qos_profile_system_default,
         )
@@ -368,30 +350,20 @@ class MegaPoseNode(Node):
         # >>> Image Subscriber >>>
         self._image_manager = ImageManager(
             node=self,
-            published_topics=[{"topic_name": self.get_name() + "/image_rect_raw"}],
+            published_topics=[],
             subscribed_topics=[
                 {
-                    "topic_name": "/camera/camera1/color/image_raw",  # TODO: Set the correct topic name for images
+                    "topic_name": "",  # TODO: Set the correct topic name for images
                     "callback": self._image_callback,
-                },
-                # {
-                #     "topic_name": "/camera/camera1/depth/image_rect_raw",
-                #     "callback": self._depth_image_callback,
-                # },
+                }
             ],
         )
         self._image: Image = None
-        self._depth_image: np.ndarray = None
 
         # >>> Pose Publisher >>>
         self._pose_publisher = self.create_publisher(
             PoseStamped,
             self.get_name() + "/pose",
-            qos_profile=qos_profile_system_default,
-        )
-        self._status_publisher = self.create_publisher(
-            UInt8,
-            self.get_name() + "/status",
             qos_profile=qos_profile_system_default,
         )
 
@@ -402,7 +374,6 @@ class MegaPoseNode(Node):
         """
         # Call the current status method
         self._methods[self._status]()
-        self._publish_state()
 
     def _bbox_callback(self, msg: BoundingBoxMultiArray):
         self._bbox = msg
@@ -410,31 +381,7 @@ class MegaPoseNode(Node):
     def _image_callback(self, msg: Image):
         self._image = msg
 
-    def _depth_image_callback(self, msg: Image):
-        np_depth_image = self._image_manager.decode_message(
-            msg, desired_encoding="passthrough"
-        )
-
-        average_last_depth = int(np_depth_image[:, -1].mean())
-
-        zero_pixels = np.ones((480, 20), dtype=np.uint16) * average_last_depth
-
-        new_np_depth_image = np.concatenate((np_depth_image, zero_pixels), axis=1)[
-            :, 20:
-        ]
-
-        # self._depth_image = msg
-        self._depth_image = new_np_depth_image
-
-        msg = self._image_manager.encode_message(
-            new_np_depth_image, encoding="passthrough"
-        )
-        self._image_manager.publish(
-            topic_name=self.get_name() + "/image_rect_raw",
-            msg=msg,
-        )
-
-    def _get_target_bounding_box(self):
+    def _get_target_bounding_box(self) -> List[int, int, int, int]:
         """
         Get the bounding box for the target object from the received bounding boxes.
         Returns a list of [x_min, y_min, x_max, y_max] or None if not found.
@@ -445,19 +392,12 @@ class MegaPoseNode(Node):
         for bbox in self._bbox.data:
             bbox: BoundingBox
 
-            if bbox.cls == self._object_manager.get_semtentation_label(
-                self._target_object
-            ):
-                print(f"Found bounding box for '{self._target_object}': {bbox.bbox}")
-                return bbox.bbox.tolist()
+            if bbox.cls == self._target_object:
+                return bbox.bbox
 
         return None
 
-    def _publish_state(self):
-        msg = UInt8(data=self._status.value)
-        self._status_publisher.publish(msg)
-
-    def _post_process_result(self, response: dict, threshold: float) -> dict:
+    def _post_process_result(self, response: dict) -> dict:
         if response is None:
             self.get_logger().warn(
                 f"Failed to get initial cTos for '{self._target_object}'. Response is None."
@@ -465,20 +405,25 @@ class MegaPoseNode(Node):
             return None
 
         # If the score is above a threshold, update the status to TRACKING
-
-        if float(response["score"]) > threshold:
-            self.get_logger().info(f"Tracking Success: {response['score']:.2f}")
+        if float(response["score"]) > self._score_threshold:
+            self.get_logger().info(
+                f"Initial cTos for '{self._target_object}' received successfully."
+            )
+            self.get_logger().info(f"Score: {response['score']:.2f}")
 
             result = {
-                "cTo": list(response["cTo"]),
+                "cTo": np.array(response["cTo"]).reshape(4, 4),  # Convert to 4x4 matrix
                 "score": response["score"],
             }
+
+            # Update the status to TRACKING
+            self._update_status()
 
             return result
 
         else:
             self.get_logger().warn(
-                f"Failed to get initial cTos for '{self._target_object}'. Score: {response['score']:.2f}"
+                f"Failed to get initial cTos for '{self._target_object}'. Score: {result['score']:.2f}"
             )
             return None
 
@@ -512,7 +457,7 @@ class MegaPoseNode(Node):
 
         pose_stamped = PoseStamped(
             header=Header(
-                frame_id="camera1_color_frame",  # Make sure to use the correct frame_id
+                frame_id=self._megapose_client.camera_info.header.frame_id,  # Make sure to use the correct frame_id
                 stamp=self.get_clock().now().to_msg(),
             ),
             pose=Pose(
@@ -545,10 +490,6 @@ class MegaPoseNode(Node):
             self.get_logger().warn("Waiting for image to be received.")
             return None
 
-        # if self._depth_image is None:
-        #     self.get_logger().warn("Waiting for depth image to be received.")
-        #     return None
-
         if self._bbox is None:
             self.get_logger().warn("Waiting for bounding box to be received.")
             return None
@@ -562,9 +503,8 @@ class MegaPoseNode(Node):
         # 0. Decode the image message to a NumPy array
         np_image = self._image_manager.decode_message(
             self._image,
-            desired_encoding="rgb8",  # TODO: Check desired encoding is "bgr8"
+            desired_encoding="bgr8",  # TODO: Check desired encoding is "bgr8"
         )
-        # np_depth_image = self._depth_image
 
         # 1. Get the bounding box for the target object
         bbox = self._get_target_bounding_box()
@@ -575,35 +515,20 @@ class MegaPoseNode(Node):
             )
             return None
 
-        # print("1: ", bbox)
-
-        # bbox = np.array(bbox)
-        # offset = np.array([-1.0, -1.0, 1.0, 1.0])
-
-        # bbox = (bbox + offset).tolist()  # Adjust the bounding box by an offset
-
-        # print("2: ", bbox)
-
         data = {
             "detections": [bbox],
             "labels": [self._target_object],
             "use_depth": False,
-            "refiner_iterations": self._refiner_iterations
-            + 3,  # Number of iterations for the refiner
-            # "depth_scale_to_m": 0.001,
+            "refiner_iterations": self._refiner_iterations,  # Number of iterations for the refiner
         }
 
         # 2. Send the request to the MegaPose server
         response = self._megapose_client.send_pose_request_rgb(
             image=np_image, json_data=data
-        )[0]
-
-        # response = self._megapose_client.send_pose_request_rgbd(
-        #     image=np_image, depth=np_depth_image, json_data=data
-        # )[0]
+        )
 
         # 3. Check the response
-        result = self._post_process_result(response, threshold=0.5)
+        result = self._post_process_result(response)
 
         if result is None:
             self.get_logger().warn(
@@ -611,7 +536,7 @@ class MegaPoseNode(Node):
             )
             return None
 
-        self._data = result  # Update Data
+        self._data = result
         self._update_status()
 
     def _tracking(self):
@@ -621,46 +546,38 @@ class MegaPoseNode(Node):
         # 0. Decode the image message to a NumPy array
         np_image = self._image_manager.decode_message(
             self._image,
-            desired_encoding="rgb8",  # TODO: Check desired encoding is "bgr8"
+            desired_encoding="bgr8",  # TODO: Check desired encoding is "bgr8"
         )
-        # np_depth_image = self._depth_image
 
         cTo: np.ndarray = self._data["cTo"]
 
         data = {
-            "initial_cTos": cTo,
+            "initial_cTos": cTo.flatten().tolist(),
             "labels": [self._target_object],
             "refiner_iterations": self._refiner_iterations,  # Number of iterations for the refiner
             "use_depth": False,  # Whether to use depth information
-            # "depth_scale_to_m": 0.001,
         }
 
         # 1. Send the request to the MegaPose server
         response = self._megapose_client.send_pose_request_rgb(
             image=np_image, json_data=data
-        )[0]
-
-        # response = self._megapose_client.send_pose_request_rgbd(
-        #     image=np_image, depth=np_depth_image, json_data=data
-        # )[0]
+        )
 
         # 2. Check the response
-        result = self._post_process_result(response, threshold=self._score_threshold)
+        result = self._post_process_result(response)
 
         if result is None:
             self.get_logger().warn(
                 f"Tracking lost for '{self._target_object}'. Trying to reinitialize."
             )
             self._update_status()
-
             return None
 
         else:
             cTo = np.array(result["cTo"]).reshape(4, 4)
 
-            self._data = result
-
             pose_stamped = self._get_pose_stamped(cTo)
+
             self._pose_publisher.publish(pose_stamped)
 
     def _lost(self):
@@ -720,30 +637,4 @@ def main(args=None):
     args = parser.parse_args(argv[1:])
     kagrs = vars(args)
 
-    print(kagrs)
-
-    node = MegaPoseNode(**kagrs)
-
-    # Spin in a separate thread
-    thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
-    thread.start()
-
-    hz = 30.0
-    rate = node.create_rate(hz)
-
-    try:
-        while rclpy.ok():
-            node.run()
-            rate.sleep()
-
-    except KeyboardInterrupt:
-        pass
-
-    node.destroy_node()
-
-    rclpy.shutdown()
-    thread.join()
-
-
-if __name__ == "__main__":
-    main()
+    node = MegaPoseNode(node=node, **kagrs)
