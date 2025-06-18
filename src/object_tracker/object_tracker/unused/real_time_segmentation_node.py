@@ -92,7 +92,7 @@ class RealTimeSegmentationNode(Node):
         # <<< Managers <<<
 
         # >>> ROS2 >>>
-        self._segmented_bbox_publisher = self.create_publisher(
+        self.segmented_bbox_publisher = self.create_publisher(
             BoundingBoxMultiArray,
             self.get_name() + "/segmented_bbox",
             qos_profile=qos_profile_system_default,
@@ -107,14 +107,15 @@ class RealTimeSegmentationNode(Node):
     def _image_callback(self, msg: Image):
         self._camera_image = msg
 
-    def _publish_bbox_image(
-        self, np_image: np.ndarray, bboxes: BoundingBoxMultiArray
-    ) -> None:
+    def _publish_bbox_image(self, bboxes: BoundingBoxMultiArray) -> None:
+        np_image = self._image_manager.decode_message(
+            self._camera_image, desired_encoding="rgb8"
+        )  # TODO: Make sure the image is in RGB format
 
         for bbox in bboxes.data:
             bbox: BoundingBox
 
-            x1, y1, x2, y2 = map(int, bbox.bbox)
+            x1, y1, x2, y2 = bbox.bbox
 
             # 바운딩 박스 그리기
             label = f"{bbox.cls}, {bbox.conf:.2f}"
@@ -144,20 +145,20 @@ class RealTimeSegmentationNode(Node):
         )
 
         self._image_manager.publish(
-            topic_name=self.get_name() + "/segmented_image",
+            topic_name=self.get_name() + "/segmented_bbox",
             msg=segmented_image,
         )
 
         return segmented_image
 
-    def do_segmentation(self) -> BoundingBoxMultiArray | None:
+    def _do_segmentation(self, msg: Image) -> BoundingBoxMultiArray | None:
         if self._camera_image is None:
             self.get_logger().warn("No camera image received yet.")
             return None
 
         # Load Image
         np_image = self._image_manager.decode_message(
-            self._camera_image, desired_encoding="rgb8"
+            msg, desired_encoding="rgb8"
         )  # TODO: Make sure the image is in RGB format
         pil_image = PILImage.fromarray(np_image)
 
@@ -174,12 +175,10 @@ class RealTimeSegmentationNode(Node):
         # Make color dictionary for bounding boxes
         if self._color_dict is None:
             color_dict = {}
-            for idx, _ in enumerate(classes):
+            for idx, cls in enumerate(classes):
                 # Generate a random color for each class
-                color = (np.random.randint(0, 255), np.random.randint(0, 255), 255)
-                color_dict[classes[idx]] = color
-
-            self.get_logger().info(f"Generated color dictionary: {color_dict}")
+                color = tuple(np.random.randint(0, 255, size=3).tolist())
+                color_dict[cls] = color
 
             self._color_dict = color_dict
 
@@ -200,9 +199,6 @@ class RealTimeSegmentationNode(Node):
 
             # >>> STEP 2. 바운딩 박스 추가
             bboxes.data.append(BoundingBox(id=id, cls=cls, conf=conf, bbox=bbox))
-
-        self._publish_bbox_image(np_image, bboxes)
-        self._segmented_bbox_publisher.publish(bboxes)
 
         return bboxes
 
@@ -234,29 +230,11 @@ def main(args=None):
     args = parser.parse_args(argv[1:])
     kagrs = vars(args)
 
-    print(kagrs)
-
     node = RealTimeSegmentationNode(**kagrs)
 
-    # Spin in a separate thread
-    thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
-    thread.start()
-
-    hz = 30.0
-    rate = node.create_rate(hz)
-
-    try:
-        while rclpy.ok():
-            node.do_segmentation()
-            rate.sleep()
-
-    except KeyboardInterrupt:
-        pass
+    rclpy.spin(node=node)
 
     node.destroy_node()
-
-    rclpy.shutdown()
-    thread.join()
 
 
 if __name__ == "__main__":

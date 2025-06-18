@@ -11,6 +11,7 @@ from geometry_msgs.msg import *
 from sensor_msgs.msg import *
 from nav_msgs.msg import *
 from visualization_msgs.msg import *
+from builtin_interfaces.msg import Time as BuiltinTime
 
 # TF
 from tf2_ros import *
@@ -25,16 +26,18 @@ class PoseManager:
         self._node = node
 
         # >>> Initialize state variables >>>
-        self._z = np.array([0.0, 0.0, 0.0, 0.0])  # Measurement vector [x, y, vx, vy]
+        self._z = np.array([0.0, 0.0, 0.0, 0.0])
         self._dt = 0.1
 
         # >>> Initialize Pose Subscriber >>>
         self._pose_subscriber = self._node.create_subscription(
             PoseStamped,
-            "",  # TODO: Set the topic name
+            "/megapose_client_node/pose",  # TODO: Set the topic name
             self._pose_callback,
             qos_profile=qos_profile_system_default,
         )
+        self._pose = PoseStamped()
+
         self._frame_id = ""
         self._last_time: Time = None
 
@@ -72,10 +75,12 @@ class PoseManager:
         Callback for receiving pose messages.
         Updates the measurement vector and time step.
         """
+        current_time = self._node.get_clock().now()
+
         # 1. Initialize the time step
         if self._last_time is None:
             self._frame_id = msg.header.frame_id
-            self._last_time = msg.header.stamp
+            self._last_time = current_time
 
             self._node.get_logger().info(
                 "First pose message received, initializing time."
@@ -83,27 +88,30 @@ class PoseManager:
 
             return None
 
-        current_time: Time = msg.header.stamp
-
         self._dt = (
             current_time - self._last_time
         ).nanoseconds / 1e9  # Time step in seconds
+
+        vx = (msg.pose.position.x - self._pose.pose.position.x) / self._dt
+        vy = (msg.pose.position.y - self._pose.pose.position.y) / self._dt
+
         self._z = np.array(
             [
                 msg.pose.position.x,
                 msg.pose.position.y,
-                (msg.pose.position.x - self._z[0]) / self._dt,
-                (msg.pose.position.y - self._z[1]) / self._dt,
+                vx,
+                vy,
             ]
         )  # Measurement vector [x, y, vx, vy]
 
+        self._pose = msg  # Update the last pose message
         self._last_time = current_time  # Update the last time to the current time
 
 
 class KalmanFilterNode(Node):
     class KalmanState:
         def __init__(self):
-            self._x = np.zeros((4, 1))  # State vector [x, y, vx, vy]
+            self._x = np.array([0.0, 0.0, 0.0, 0.0])  # State vector [x, y, vx, vy]
             self._P = np.eye(4)  # State
 
             self._dt = 0.1
@@ -112,14 +120,22 @@ class KalmanFilterNode(Node):
                 [
                     [1.0, 0, self._dt, 0.0],
                     [0.0, 1.0, 0.0, self._dt],
-                    [0.0, 0.0, 1.0, 0.0][0.0, 0.0, 0.0, 1.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
                 ]
             )
-            self._Q = np.eye(4) * 0.1  # Process noise covariance
+            self._Q = np.eye(4) * 0.01  # Process noise covariance
             self._R = (
-                np.eye(2) * 0.1
+                np.eye(4) * 0.01
             )  # Measurement noise covariance TODO: Set appropriate values
             self._H = np.eye(4)  # Measurement matrix
+
+        @property
+        def x(self) -> np.ndarray:
+            """
+            Returns the current state vector [x, y, vx, vy].
+            """
+            return self._x
 
         def update_A(self, dt: float) -> np.ndarray:
             """
@@ -195,6 +211,8 @@ class KalmanFilterNode(Node):
             return x, P
 
     def __init__(self):
+        super().__init__("kalman_filter_node")
+
         self._state = KalmanFilterNode.KalmanState()
         self._pose_manager = PoseManager(node=self)
 
@@ -203,6 +221,16 @@ class KalmanFilterNode(Node):
             self.get_name() + "/pose",
             qos_profile=qos_profile_system_default,
         )
+        self._status_subscriber = self.create_subscription(
+            UInt8,
+            "/megapose_client_node/status",
+            self._status_callback,
+            qos_profile=qos_profile_system_default,
+        )
+        self._megapose_status = 0
+
+    def _status_callback(self, msg: UInt8):
+        self._megapose_status = int(msg.data)
 
     def _publish_pose(self):
         msg = PoseStamped(
@@ -212,8 +240,8 @@ class KalmanFilterNode(Node):
             ),
             pose=Pose(
                 position=Point(
-                    x=self._state._x[0],
-                    y=self._state._x[1],
+                    x=self._state.x[0],
+                    y=self._state.x[1],
                     z=0.0,  # TODO: Set the z-coordinate if needed
                 ),
                 orientation=Quaternion(
@@ -228,13 +256,16 @@ class KalmanFilterNode(Node):
         self._pose_publisher.publish(msg)
 
     def run(self):
+        if self._pose_manager.last_time is None:
+            self.get_logger().warn("No pose message received yet, skipping run.")
+            return
+
         # 1. Update A
         self._state.update_A(dt=self._pose_manager._dt)
 
         # 2. Perform the Kalman filter step
-        dt = (self.get_clock().now() - self._pose_manager.last_time).nanoseconds / 1e9
         z = (
-            self._pose_manager.z if dt < 0.15 else None
+            self._pose_manager.z if self._megapose_status == 2 else None
         )  # Use the measurement if the time step is reasonable
         _, _ = self._state.filter(z)
 
@@ -251,7 +282,7 @@ def main():
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
 
-    hz = 10.0  # Frequency in Hz
+    hz = 15.0  # Frequency in Hz
     rate = node.create_rate(hz)
 
     try:
