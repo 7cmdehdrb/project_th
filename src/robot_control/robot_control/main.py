@@ -216,7 +216,7 @@ class MainNode(Node):
         # >>> Parameters >>>
         self._fk_pose: PoseStamped = None
         self._pfp_path: np.ndarray = None
-        self._z = 0.5
+        self._z = 0.2549 + 0.1
         # <<< Parameters <<<
 
         self._joint_state_manager = JointStateManager(self)
@@ -294,9 +294,15 @@ class MainNode(Node):
                 joint_states=self._joint_state_manager.joint_states,
                 end_effector="wrist_3_link",
             )
+
             if traj is not None:
-                self._execute_trajectory_manager.run(
+                scaled_traj = self._execute_trajectory_manager.scale_trajectory(
                     trajectory=traj,
+                    scale_factor=0.2,  # Scale down the trajectory for FK pose
+                )
+
+                self._execute_trajectory_manager.run(
+                    trajectory=scaled_traj,
                 )
 
                 self.get_logger().info(
@@ -322,7 +328,7 @@ class MainNode(Node):
                 x=self._fk_pose.pose.position.x,
                 y=self._fk_pose.pose.position.y,
             )
-            goal_point = PotentialPoint(x=0.55, y=0.4)  # Example goal point
+            goal_point = PotentialPoint(x=0.6, y=0.3)  # Example goal point
 
             print(f"Start Point: {start_point.x}, {start_point.y}")
             print(f"Goal Point: {goal_point.x}, {goal_point.y}")
@@ -334,7 +340,7 @@ class MainNode(Node):
                 # PotentialObstacle(x=0.0, y=0.6, r=0.05),
                 # PotentialObstacle(x=0.2, y=0.6, r=0.05),
                 # PotentialObstacle(x=-0.2, y=0.6, r=0.05),
-                PotentialObstacle(x=0.4, y=0.2, r=0.03),
+                PotentialObstacle(x=0.6, y=0.2, r=0.03),
             ]
 
             self._pfp_path = self._pf_planner.planning(
@@ -402,9 +408,9 @@ class MainNode(Node):
             execution_time = last_traj.time_from_start
             execution_time_float = execution_time.sec + execution_time.nanosec * 1e-9
 
-            # target_execution_time = 5.0
-            # executution_time_ratio = execution_time_float / target_execution_time
-            executution_time_ratio = 0.2  # No scaling for now
+            target_execution_time = 2.0
+            executution_time_ratio = execution_time_float / target_execution_time
+            # executution_time_ratio = 0.2  # No scaling for now
 
             if traj is not None:
                 scaled_traj = self._execute_trajectory_manager.scale_trajectory(
@@ -431,7 +437,7 @@ class MainNode(Node):
             )
 
             if home_joint_states is not None:
-                path: RobotTrajectory = self._cartesian_path_manager.run(
+                traj: RobotTrajectory = self._cartesian_path_manager.run(
                     header=Header(
                         frame_id="world", stamp=self.get_clock().now().to_msg()
                     ),
@@ -440,9 +446,15 @@ class MainNode(Node):
                     end_effector="wrist_3_link",
                 )
 
-                if path is not None:
+                if traj is not None:
+
+                    scaled_traj = self._execute_trajectory_manager.scale_trajectory(
+                        trajectory=traj,
+                        scale_factor=0.2,  # Scale down the trajectory for homing
+                    )
+
                     self._execute_trajectory_manager.run(
-                        trajectory=path,
+                        trajectory=scaled_traj,
                     )
 
                     self.get_logger().info("Homing completed successfully.")
