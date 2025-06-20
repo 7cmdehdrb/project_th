@@ -16,4 +16,4 @@
 [submodule "src/ur_moveit/ur_description"]
 	path = src/ur_moveit/ur_description
 	url = https://github.com/7cmdehdrb/Universal_Robots_ROS2_Description.git
-	branch = humble
+	branch = branch_7cmdehdrb

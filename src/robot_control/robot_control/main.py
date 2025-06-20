@@ -15,6 +15,7 @@ from visualization_msgs.msg import *
 from moveit_msgs.msg import *
 from moveit_msgs.srv import *
 from trajectory_msgs.msg import *
+from tf2_msgs.msg import TFMessage
 
 # TF
 from tf2_ros import *
@@ -43,11 +44,12 @@ from path_planner.potential_field_path_planner import (
 
 
 class Status(Enum):
-    INITIALIZING = -1
     WAITING = 0
     PLANNING = 1
     EXECUTING = 2
-    HOMING = 3
+    SWEEPIING = 3
+    HOMING = 4
+    END = 5
 
 
 class JointStateManager:
@@ -79,6 +81,71 @@ class JointStateManager:
             return None
 
         return self._joint_states
+
+
+class ObjectTransformManager:
+    def __init__(self, node: Node):
+        self._node = node
+
+        self._sub = self._node.create_subscription(
+            TFMessage,
+            "/isaac_sim/tf/mug",
+            self._callback,
+            qos_profile_system_default,
+        )
+        self._pub = self._node.create_publisher(
+            PoseStamped,
+            "/isaac_sim/pose/mug",
+            qos_profile=qos_profile_system_default,
+        )
+
+        self._data: PoseStamped = None
+
+    @property
+    def data(self) -> PoseStamped:
+        """
+        Returns the latest pose data.
+        """
+        if self._data is None:
+            self._node.get_logger().warn("Pose data not yet received.")
+            return None
+
+        return self._data
+
+    def _publish_data(self, data: PoseStamped):
+        """
+        Publishes the pose data.
+        """
+        if data is not None:
+            self._pub.publish(data)
+        else:
+            self._node.get_logger().warn("No data to publish.")
+
+    def _callback(self, msg: TFMessage):
+        if len(msg.transforms) == 1:
+            transform: TransformStamped = msg.transforms[0]
+
+            self._data = PoseStamped(
+                header=Header(
+                    frame_id="world",
+                    stamp=self._node.get_clock().now().to_msg(),
+                ),
+                pose=Pose(
+                    position=Point(
+                        x=transform.transform.translation.x,
+                        y=transform.transform.translation.y,
+                        z=transform.transform.translation.z,
+                    ),
+                    orientation=Quaternion(
+                        x=transform.transform.rotation.x,
+                        y=transform.transform.rotation.y,
+                        z=transform.transform.rotation.z,
+                        w=transform.transform.rotation.w,
+                    ),
+                ),
+            )
+
+            self._publish_data(self._data)
 
 
 def parse_obstacles_to_marker_array(
@@ -182,11 +249,12 @@ class MainNode(Node):
 
         self._status = Status.WAITING
         self._methods = {
-            Status.INITIALIZING: self._initializing,
             Status.WAITING: self._waiting,
             Status.PLANNING: self._planning,
             Status.EXECUTING: self._executing,
+            Status.SWEEPIING: self._sweeping,
             Status.HOMING: self._homing,
+            Status.END: self._end,
         }
 
         # Initialize the potential field planner
@@ -198,6 +266,9 @@ class MainNode(Node):
             area_offset=1.0,  # potential area width [m]
             oscillations=3,  # number of previous positions to check for oscillations
         )
+
+        # Initialize the object transform manager
+        self._object_transform_manager = ObjectTransformManager(self)
 
         # >>> MoveIt2 Service Managers
         self._fk_manager = FK_ServiceManager(self)
@@ -216,6 +287,7 @@ class MainNode(Node):
         # >>> Parameters >>>
         self._fk_pose: PoseStamped = None
         self._pfp_path: np.ndarray = None
+        self._z0 = 0.2549  # Initial Z position of the end effector
         self._z = 0.2549 + 0.1
         # <<< Parameters <<<
 
@@ -236,7 +308,7 @@ class MainNode(Node):
                 2.2,
                 0.0,
                 1.57,
-                0.785,
+                np.pi / 2.0,
                 0.0,
             ],
         )
@@ -255,22 +327,18 @@ class MainNode(Node):
         self._methods[self._status]()
 
     def _update_status(self):
-        if self._status == Status.HOMING:
-            self._status = Status.WAITING
-            self.get_logger().info("Homing completed. Status set to WAITING.")
+        self._status = Status(self._status.value + 1)
 
-        else:
-            self._status = Status(self._status.value + 1)
+        # if self._status == Status.HOMING:
+        #     self._status = Status.WAITING
+        #     self.get_logger().info("Homing completed. Status set to WAITING.")
+
+        # else:
+        #     self._status = Status(self._status.value + 1)
 
         return self._status.value
 
     # >>> State Machine Methods
-    def _initializing(self):
-        """
-        0. Initialize the node and services.
-        """
-        pass
-
     def _waiting(self):
         """
         1. Get FK Position
@@ -285,20 +353,20 @@ class MainNode(Node):
             self._fk_pose: PoseStamped = self._fk_manager.run(
                 # joint_states=self._joint_state_manager.joint_states,
                 joint_states=self._home_joints,  # Use home joints for FK
-                end_effector="wrist_3_link",
+                end_effector="gripper_link",
             )
 
             traj: RobotTrajectory = self._cartesian_path_manager.run(
                 header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
                 waypoints=[self._fk_pose.pose],
                 joint_states=self._joint_state_manager.joint_states,
-                end_effector="wrist_3_link",
+                end_effector="gripper_link",
             )
 
             if traj is not None:
                 scaled_traj = self._execute_trajectory_manager.scale_trajectory(
                     trajectory=traj,
-                    scale_factor=0.2,  # Scale down the trajectory for FK pose
+                    scale_factor=0.7,  # Scale down the trajectory for FK pose
                 )
 
                 self._execute_trajectory_manager.run(
@@ -324,23 +392,27 @@ class MainNode(Node):
         """
 
         try:
+            if self._object_transform_manager.data is None:
+                raise ValueError("Object transform data not available.")
+
             start_point = PotentialPoint(
                 x=self._fk_pose.pose.position.x,
                 y=self._fk_pose.pose.position.y,
             )
-            goal_point = PotentialPoint(x=0.6, y=0.3)  # Example goal point
+            goal_point = PotentialPoint(
+                x=self._object_transform_manager.data.pose.position.x,
+                y=self._object_transform_manager.data.pose.position.y + 0.15,
+            )  # Example goal point
 
             print(f"Start Point: {start_point.x}, {start_point.y}")
             print(f"Goal Point: {goal_point.x}, {goal_point.y}")
 
             obstacles = [
-                # PotentialObstacle(x=0.0, y=0.75, r=0.05),
-                # PotentialObstacle(x=0.2, y=0.75, r=0.05),
-                # PotentialObstacle(x=-0.2, y=0.75, r=0.05),
-                # PotentialObstacle(x=0.0, y=0.6, r=0.05),
-                # PotentialObstacle(x=0.2, y=0.6, r=0.05),
-                # PotentialObstacle(x=-0.2, y=0.6, r=0.05),
-                PotentialObstacle(x=0.6, y=0.2, r=0.03),
+                PotentialObstacle(
+                    x=self._object_transform_manager.data.pose.position.x,
+                    y=self._object_transform_manager.data.pose.position.y,
+                    r=0.02,
+                ),
             ]
 
             self._pfp_path = self._pf_planner.planning(
@@ -399,7 +471,7 @@ class MainNode(Node):
             traj: RobotTrajectory = self._cartesian_path_manager.run(
                 header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
                 waypoints=poses,
-                end_effector="wrist_3_link",
+                end_effector="gripper_link",
                 joint_states=self._joint_state_manager.joint_states,
             )
 
@@ -428,12 +500,55 @@ class MainNode(Node):
             self.get_logger().error(f"Execution failed: {e}")
             return None
 
+    def _sweeping(self):
+        try:
+            start_pose: PoseStamped = self._fk_manager.run(
+                joint_states=self._joint_state_manager.joint_states,
+                end_effector="gripper_link",
+            )
+
+            end_pose = PoseStamped(
+                header=start_pose.header,
+                pose=Pose(
+                    position=Point(
+                        x=start_pose.pose.position.x,
+                        y=start_pose.pose.position.y - 0.3,
+                        z=start_pose.pose.position.z,
+                    ),
+                    orientation=start_pose.pose.orientation,
+                ),
+            )
+
+            traj: RobotTrajectory = self._cartesian_path_manager.run(
+                header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+                waypoints=[start_pose.pose, end_pose.pose],
+                joint_states=self._joint_state_manager.joint_states,
+                end_effector="gripper_link",
+            )
+
+            if traj is not None:
+                scaled_traj = self._execute_trajectory_manager.scale_trajectory(
+                    trajectory=traj,
+                    scale_factor=0.7,  # Scale down the trajectory for sweeping
+                )
+
+                self._execute_trajectory_manager.run(
+                    trajectory=scaled_traj,
+                )
+
+                self.get_logger().info("Sweeping completed successfully.")
+                self._update_status()
+
+        except Exception as e:
+            self.get_logger().error(f"Sweeping failed: {e}")
+            return None
+
     def _homing(self):
         try:
             home_joint_states = self._ik_manager.run(
                 pose_stamped=self._fk_pose,
                 joint_states=self._joint_state_manager.joint_states,
-                end_effector="wrist_3_link",
+                end_effector="gripper_link",
             )
 
             if home_joint_states is not None:
@@ -443,14 +558,14 @@ class MainNode(Node):
                     ),
                     waypoints=[self._fk_pose.pose],
                     joint_states=self._joint_state_manager.joint_states,
-                    end_effector="wrist_3_link",
+                    end_effector="gripper_link",
                 )
 
                 if traj is not None:
 
                     scaled_traj = self._execute_trajectory_manager.scale_trajectory(
                         trajectory=traj,
-                        scale_factor=0.2,  # Scale down the trajectory for homing
+                        scale_factor=0.7,  # Scale down the trajectory for homing
                     )
 
                     self._execute_trajectory_manager.run(
@@ -463,6 +578,9 @@ class MainNode(Node):
         except Exception as e:
             self.get_logger().error(f"Homing failed: {e}")
             return None
+
+    def _end(self):
+        pass
 
     # <<< State Machine Methods
 
