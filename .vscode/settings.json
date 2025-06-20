@@ -13,4 +13,5 @@
         "./install/path_planner/lib/python3.10/site-packages",
         "./install/robot_control/lib/python3.10/site-packages",
     ],
+    "cmake.sourceDirectory": "/home/min/7cmdehdrb/project_th/src/custom_msgs",
 }

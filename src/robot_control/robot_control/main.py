@@ -43,6 +43,7 @@ from path_planner.potential_field_path_planner import (
 
 
 class Status(Enum):
+    INITIALIZING = -1
     WAITING = 0
     PLANNING = 1
     EXECUTING = 2
@@ -148,12 +149,40 @@ def parse_np_path_to_pose_array(
     return pose_array
 
 
+def parse_np_path_to_pose_array_with_z_curve(
+    path: np.ndarray, start_z: float, end_z: float, orientation: Quaternion
+) -> list[Pose]:
+    """
+    Converts a numpy array path to a list of ROS Pose messages.
+    The Z value is interpolated along a log-like curve from start_z to end_z.
+    """
+    n_points = len(path)
+    pose_array = []
+
+    # Create log-shaped curve: values from 0 to 1, then scaled to [start_z, end_z]
+    t = np.linspace(0, 1, n_points)
+    curve = np.log1p(9 * t) / np.log1p(9)  # log1p for numerical stability
+
+    z_values = start_z + curve * (end_z - start_z)
+
+    for i, point in enumerate(path):
+        pose = Pose()
+        pose.position.x = point[0]
+        pose.position.y = point[1]
+        pose.position.z = z_values[i]
+        pose.orientation = orientation
+        pose_array.append(pose)
+
+    return pose_array
+
+
 class MainNode(Node):
     def __init__(self):
         super().__init__("robot_control_node")
 
         self._status = Status.WAITING
         self._methods = {
+            Status.INITIALIZING: self._initializing,
             Status.WAITING: self._waiting,
             Status.PLANNING: self._planning,
             Status.EXECUTING: self._executing,
@@ -162,7 +191,7 @@ class MainNode(Node):
 
         # Initialize the potential field planner
         self._pf_planner = PotentialFieldPlanner(
-            rr=0.05,  # robot radius [m]
+            rr=0.08,  # robot radius [m]
             resolution=0.02,  # grid resolution [m]
             kp=1.0,  # attractive potential gain
             eta=100.0,  # repulsive potential gain
@@ -187,9 +216,30 @@ class MainNode(Node):
         # >>> Parameters >>>
         self._fk_pose: PoseStamped = None
         self._pfp_path: np.ndarray = None
+        self._z = 0.5
         # <<< Parameters <<<
 
         self._joint_state_manager = JointStateManager(self)
+
+        # >>> Unique Joint States >>>
+        self._home_joints = JointState(
+            name=[
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+                "shoulder_pan_joint",
+            ],
+            position=[
+                -2.2,
+                2.2,
+                0.0,
+                1.57,
+                0.785,
+                0.0,
+            ],
+        )
 
         # Create a publisher
         self._marker_publisher = self.create_publisher(
@@ -215,6 +265,12 @@ class MainNode(Node):
         return self._status.value
 
     # >>> State Machine Methods
+    def _initializing(self):
+        """
+        0. Initialize the node and services.
+        """
+        pass
+
     def _waiting(self):
         """
         1. Get FK Position
@@ -227,15 +283,27 @@ class MainNode(Node):
             print("Calculating FK Pose...")
 
             self._fk_pose: PoseStamped = self._fk_manager.run(
-                joint_states=self._joint_state_manager.joint_states,
+                # joint_states=self._joint_state_manager.joint_states,
+                joint_states=self._home_joints,  # Use home joints for FK
                 end_effector="wrist_3_link",
             )
 
-            self.get_logger().info(
-                f"FK Pose: {self._fk_pose.pose.position.x:.3f}, {self._fk_pose.pose.position.y:.3f}, {self._fk_pose.pose.position.z:.3f}"
+            traj: RobotTrajectory = self._cartesian_path_manager.run(
+                header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+                waypoints=[self._fk_pose.pose],
+                joint_states=self._joint_state_manager.joint_states,
+                end_effector="wrist_3_link",
             )
+            if traj is not None:
+                self._execute_trajectory_manager.run(
+                    trajectory=traj,
+                )
 
-            self._update_status()
+                self.get_logger().info(
+                    f"FK Pose: {self._fk_pose.pose.position.x:.3f}, {self._fk_pose.pose.position.y:.3f}, {self._fk_pose.pose.position.z:.3f}"
+                )
+
+                self._update_status()
 
         except Exception as e:
             self.get_logger().error(f"FK calculation failed: {e}")
@@ -254,15 +322,19 @@ class MainNode(Node):
                 x=self._fk_pose.pose.position.x,
                 y=self._fk_pose.pose.position.y,
             )
-            goal_point = PotentialPoint(x=-0.3, y=0.6)  # Example goal point
+            goal_point = PotentialPoint(x=0.55, y=0.4)  # Example goal point
+
+            print(f"Start Point: {start_point.x}, {start_point.y}")
+            print(f"Goal Point: {goal_point.x}, {goal_point.y}")
 
             obstacles = [
-                PotentialObstacle(x=0.0, y=0.75, r=0.05),
-                PotentialObstacle(x=0.2, y=0.75, r=0.05),
-                PotentialObstacle(x=-0.2, y=0.75, r=0.05),
-                PotentialObstacle(x=0.0, y=0.6, r=0.05),
-                PotentialObstacle(x=0.2, y=0.6, r=0.05),
-                PotentialObstacle(x=-0.2, y=0.6, r=0.05),
+                # PotentialObstacle(x=0.0, y=0.75, r=0.05),
+                # PotentialObstacle(x=0.2, y=0.75, r=0.05),
+                # PotentialObstacle(x=-0.2, y=0.75, r=0.05),
+                # PotentialObstacle(x=0.0, y=0.6, r=0.05),
+                # PotentialObstacle(x=0.2, y=0.6, r=0.05),
+                # PotentialObstacle(x=-0.2, y=0.6, r=0.05),
+                PotentialObstacle(x=0.4, y=0.2, r=0.03),
             ]
 
             self._pfp_path = self._pf_planner.planning(
@@ -281,7 +353,8 @@ class MainNode(Node):
             self._path_publisher.publish(
                 parse_np_path_to_path(
                     self._pfp_path,
-                    self._fk_pose.pose.position.z,
+                    self._z,
+                    # self._fk_pose.pose.position.z,
                     Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
                 )
             )
@@ -303,13 +376,23 @@ class MainNode(Node):
                 [self._pfp_path[::50], self._pfp_path[-1]]
             )  # Slicing the path for execution
 
+            poses = parse_np_path_to_pose_array_with_z_curve(
+                sliced_path,
+                start_z=self._fk_pose.pose.position.z,
+                end_z=self._z,  # Assuming the end Z is the same as the initial Z
+                orientation=self._fk_pose.pose.orientation,
+            )
+
+            # poses = parse_np_path_to_pose_array(
+            #     sliced_path,
+            #     self._z,
+            #     # self._fk_pose.pose.position.z,
+            #     self._fk_pose.pose.orientation,
+            # )
+
             traj: RobotTrajectory = self._cartesian_path_manager.run(
                 header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
-                waypoints=parse_np_path_to_pose_array(
-                    sliced_path,
-                    self._fk_pose.pose.position.z,
-                    self._fk_pose.pose.orientation,
-                ),
+                waypoints=poses,
                 end_effector="wrist_3_link",
                 joint_states=self._joint_state_manager.joint_states,
             )
@@ -319,8 +402,9 @@ class MainNode(Node):
             execution_time = last_traj.time_from_start
             execution_time_float = execution_time.sec + execution_time.nanosec * 1e-9
 
-            target_execution_time = 5.0
-            executution_time_ratio = execution_time_float / target_execution_time
+            # target_execution_time = 5.0
+            # executution_time_ratio = execution_time_float / target_execution_time
+            executution_time_ratio = 0.2  # No scaling for now
 
             if traj is not None:
                 scaled_traj = self._execute_trajectory_manager.scale_trajectory(

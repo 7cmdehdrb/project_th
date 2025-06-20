@@ -380,7 +380,7 @@ class PotentialFieldPlanner:
 
 def main2():
     pfp = PotentialFieldPlanner(
-        rr=0.05,  # robot radius [m]
+        rr=0.08,  # robot radius [m]
         resolution=0.02,  # grid resolution [m]
         kp=1.0,  # attractive potential gain
         eta=100.0,  # repulsive potential gain
