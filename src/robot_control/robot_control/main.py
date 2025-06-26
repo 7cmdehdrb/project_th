@@ -99,7 +99,7 @@ class ObjectTransformManager:
         )
 
         transformed_tf_pose: PoseStamped = self._transform_manager.transform_pose(
-            tf_pose=tf_pose,
+            pose=tf_pose,
             target_frame="world",
             source_frame=self._data.header.frame_id,
         )
@@ -123,34 +123,34 @@ class ObjectTransformManager:
 
     # def _callback(self, msg: TFMessage):
     #     if len(msg.transforms) == 1:
-            transform: TransformStamped = msg.transforms[0]
+    #         transform: TransformStamped = msg.transforms[0]
 
-            data = PoseStamped(
-                header=Header(
-                    frame_id="world",
-                    stamp=self._node.get_clock().now().to_msg(),
-                ),
-                pose=Pose(
-                    position=Point(
-                        x=transform.transform.translation.x,
-                        y=transform.transform.translation.y,
-                        z=transform.transform.translation.z,
-                    ),
-                    orientation=Quaternion(
-                        x=transform.transform.rotation.x,
-                        y=transform.transform.rotation.y,
-                        z=transform.transform.rotation.z,
-                        w=transform.transform.rotation.w,
-                    ),
-                ),
-            )
+    #         data = PoseStamped(
+    #             header=Header(
+    #                 frame_id="world",
+    #                 stamp=self._node.get_clock().now().to_msg(),
+    #             ),
+    #             pose=Pose(
+    #                 position=Point(
+    #                     x=transform.transform.translation.x,
+    #                     y=transform.transform.translation.y,
+    #                     z=transform.transform.translation.z,
+    #                 ),
+    #                 orientation=Quaternion(
+    #                     x=transform.transform.rotation.x,
+    #                     y=transform.transform.rotation.y,
+    #                     z=transform.transform.rotation.z,
+    #                     w=transform.transform.rotation.w,
+    #                 ),
+    #             ),
+    #         )
 
-            if self._data is None:
-                self._data = data
+    #         if self._data is None:
+    #             self._data = data
 
-            else:
-                self._data = data
-                self._publish_data(self._data)
+    #         else:
+    #             self._data = data
+    #             self._publish_data(self._data)
 
 
 class ControllerSwitcher(object):
@@ -787,7 +787,7 @@ class MainNode(Node):
         )
         goal_point = PotentialPoint(
             x=self._object_transform_manager.data.pose.position.x,
-            y=self._object_transform_manager.data.pose.position.y + 0.15,
+            y=self._object_transform_manager.data.pose.position.y + 0.1,
         )
         obstacles = [
             PotentialObstacle(
@@ -1012,7 +1012,7 @@ class MainNode(Node):
         for _ in range(10):
             self._path_publisher.publish(path_msg)
 
-        hz = 10.0
+        hz = 30.0
         dt = 1.0 / hz  # Time step for the controller
 
         def check_goal_reached(
@@ -1096,13 +1096,18 @@ class MainNode(Node):
             y_control_msg = np.array([0.0, y_diff * y_gain, 0.0, 0.0, 0.0, 0.0])
 
             angle_gain = 1.0
-            angle_control_msg = np.clip(
-                np.array([0.0, 0.0, 0.0, 0.0, 0.0, angle_diff * angle_gain]), -0.2, 0.2
-            )
+            angle_control_msg = (
+                np.clip(
+                    np.array([0.0, 0.0, 0.0, 0.0, 0.0, angle_diff * angle_gain]),
+                    -0.2,
+                    0.2,
+                )
+                * 1.0
+            )  # TODO: REMOVE 0.0
 
             control_msg = y_control_msg + x_control_msg
             normalized_control_msg = (
-                (control_msg / np.linalg.norm(control_msg)) * 0.05
+                (control_msg / np.linalg.norm(control_msg)) * 0.03
             ) + angle_control_msg
 
             J_inv = np.linalg.pinv(self._eef_manager.J)

@@ -82,4 +82,5 @@ ros2 run tf2_ros static_transform_publisher -0.2575 -0.2725 0.46 0.0 0.0 0.0 0.1
 ```
 
 ```bash
-ros2 run tf2_ros static_transform_publisher 0.05 0.0 0.0 0.0 0.0 0.258819 0.9659258  camera1_joint1 camera1_link```
+ros2 run tf2_ros static_transform_publisher 0.05 0.0 0.0 0.0 0.0 0.258819 0.9659258  camera1_joint1 camera1_link
+```
