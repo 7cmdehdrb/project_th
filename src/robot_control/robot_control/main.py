@@ -16,6 +16,9 @@ from moveit_msgs.msg import *
 from moveit_msgs.srv import *
 from trajectory_msgs.msg import *
 from tf2_msgs.msg import TFMessage
+from tf2_geometry_msgs.tf2_geometry_msgs import PoseStamped as TF2PoseStamped
+from controller_manager_msgs.srv import SwitchController, ListControllers
+from controller_manager_msgs.msg import ControllerState
 
 # TF
 from tf2_ros import *
@@ -25,6 +28,8 @@ import numpy as np
 from enum import Enum
 from typing import List, Optional, Dict, Any
 from abc import ABC, abstractmethod
+from collections import deque
+import rotutils
 
 # ROS2 Custom Package
 from moveit2_commander import (
@@ -41,49 +46,11 @@ from path_planner.potential_field_path_planner import (
     PotentialObstacle,
     PotentialFieldPlanner,
 )
-
-
-class Status(Enum):
-    WAITING = 0
-    PLANNING = 1
-    EXECUTING = 2
-    SWEEPIING = 3
-    HOMING = 4
-    END = 5
-
-
-class JointStateManager:
-    def __init__(self, node: Node):
-        self._node = node
-        self._joint_states: JointState = None
-
-        # Subscriber to joint states
-        self._joint_state_subscriber = self._node.create_subscription(
-            JointState,
-            "/joint_states",
-            self._joint_state_callback,
-            qos_profile_system_default,
-        )
-
-    def _joint_state_callback(self, msg: JointState):
-        """
-        Callback function to update the joint states.
-        """
-        self._joint_states = msg
-
-    @property
-    def joint_states(self) -> JointState:
-        """
-        Returns the latest joint states.
-        """
-        if self._joint_states is None:
-            self._node.get_logger().warn("Joint states not yet received.")
-            return None
-
-        return self._joint_states
+from base_package.manager import SimpleSubscriberManager, TransformManager
 
 
 class ObjectTransformManager:
+    # ONLY FOR ISSAC SIM
     def __init__(self, node: Node):
         self._node = node
 
@@ -100,6 +67,15 @@ class ObjectTransformManager:
         )
 
         self._data: PoseStamped = None
+        self._direction: np.ndarray = None
+
+    @property
+    def direction(self) -> np.ndarray:
+        """
+        Returns the direction vector of the latest pose data.
+        If no data is available, returns a default direction.
+        """
+        return self._direction
 
     @property
     def data(self) -> PoseStamped:
@@ -125,7 +101,7 @@ class ObjectTransformManager:
         if len(msg.transforms) == 1:
             transform: TransformStamped = msg.transforms[0]
 
-            self._data = PoseStamped(
+            data = PoseStamped(
                 header=Header(
                     frame_id="world",
                     stamp=self._node.get_clock().now().to_msg(),
@@ -145,119 +121,463 @@ class ObjectTransformManager:
                 ),
             )
 
-            self._publish_data(self._data)
+            if self._data is None:
+                self._data = data
+                self._direction = None
+
+            if data is not None:
+                direction = np.array(
+                    [
+                        data.pose.position.x - self._data.pose.position.x,
+                        data.pose.position.y - self._data.pose.position.y,
+                    ]
+                )
+
+                self._data = data
+
+                self._direction = (
+                    direction / np.linalg.norm(direction)
+                    if np.linalg.norm(direction) > 0
+                    else None
+                )
+
+                self._publish_data(self._data)
 
 
-def parse_obstacles_to_marker_array(
-    obstacles: List[PotentialObstacle], z: float, header: Header
-) -> MarkerArray:
-    marker_array = MarkerArray()
+class ControllerSwitcher(object):
+    def __init__(self, node: Node):
+        self._node = node
 
-    for i, obstacle in enumerate(obstacles):
-        obstacle: PotentialObstacle
+        # >>> Initialize /controller_manager/switch_controller >>>
+        self._switch_cli = self._node.create_client(
+            SwitchController, "/controller_manager/switch_controller"
+        )
+        while not self._switch_cli.wait_for_service(timeout_sec=1.0):
+            self._node.get_logger().info(
+                "Waiting for /controller_manager/switch_controller service..."
+            )
 
-        marker = Marker()
-        marker.header = header
-        marker.id = i
-        marker.type = Marker.CYLINDER
-        marker.action = Marker.ADD
-        marker.pose.position.x = obstacle.x
-        marker.pose.position.y = obstacle.y
-        marker.pose.position.z = 0.25 + 0.05
-        marker.scale.x = obstacle.r
-        marker.scale.y = obstacle.r
-        marker.scale.z = 0.12
+        self._node.get_logger().info(
+            "Connected to /controller_manager/switch_controller service."
+        )
 
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 0.3  # Fully opaque
+        # <<< Initialize /controller_manager/switch_controller <<<
 
-        marker_array.markers.append(marker)
+        # >>> Initialize /controller_manager/list_controllers >>>
+        self._list_cli = self._node.create_client(
+            ListControllers, "/controller_manager/list_controllers"
+        )
+        while not self._list_cli.wait_for_service(timeout_sec=1.0):
+            self._node.get_logger().info(
+                "Waiting for /controller_manager/list_controllers service..."
+            )
 
-    return marker_array
+        self._node.get_logger().info(
+            "Connected to /controller_manager/list_controllers service."
+        )
+
+        # <<< Initialize /controller_manager/list_controllers <<<
+
+        self._status = {
+            "scaled_joint_trajectory_controller": False,
+            "forward_velocity_controller": False,
+        }
+
+        # Get the status of the controllers
+
+    def get_controller_status(self):
+        req = ListControllers.Request()
+
+        response: ListControllers.Response = self._list_cli.call(req)
+
+        if response is not None:
+            for controller in response.controller:
+                controller: ControllerState
+
+                for name in self._status.keys():
+                    if controller.name == name:
+                        self._status[name] = controller.state == "active"
+
+        else:
+            self._node.get_logger().error("Failed to get controller list.")
+
+        return self._status
+
+    def change_controller_state(self, data: dict):
+        request = SwitchController.Request()
+
+        request.activate_controllers = data.get("activate_controllers", [])
+        request.deactivate_controllers = data.get("deactivate_controllers", [])
+
+        self._node.get_logger().info(
+            f"Activating controllers: {request.activate_controllers}, Deactivating controllers: {request.deactivate_controllers}"
+        )
+
+        request.strictness = SwitchController.Request.STRICT
+
+        response: SwitchController.Response = self._switch_cli.call(request)
+
+        if response is not None:
+            if response.ok:
+                return True
+
+        return False
 
 
-def parse_np_path_to_path(path: np.ndarray, z: float, header: Header) -> Path:
-    """
-    Converts a numpy array path to a ROS Path message.
-    """
-    ros_path = Path()
-    ros_path.header = header
+class EEFManager(object):
+    def __init__(self, node: Node):
+        self._node = node
 
-    for point in path:
-        pose = PoseStamped()
-        pose.header = header
-        pose.pose.position.x = point[0]
-        pose.pose.position.y = point[1]
-        pose.pose.position.z = z  # Assuming a flat plane
-        ros_path.poses.append(pose)
+        self._joint_states_manager = SimpleSubscriberManager(
+            node=self._node,
+            topic_name="/joint_states",
+            msg_type=JointState,
+        )
 
-    return ros_path
+        self._dh_params = [
+            (0, 0.1625, np.pi / 2),
+            (-0.425, 0, 0),
+            (-0.3922, 0, 0),
+            (0, 0.1333, np.pi / 2),
+            (0, 0.0997, -np.pi / 2),
+            (0, 0.0996, 0),
+        ]
+        self._gripper_offset = np.array([0, 0, 0.12])  # Gripper offset in Z direction
+
+    @property
+    def J(self) -> np.ndarray:
+        jacobian = self._compute_jacobian()
+
+        if jacobian is None:
+            return None
+
+        if np.isclose(np.linalg.norm(jacobian), 0.0):
+            self._node.get_logger().warn(
+                "Jacobian is zero, cannot compute joint commands!"
+            )
+            return None
+
+        return jacobian
+
+    @staticmethod
+    def dh_transform(a, d, alpha, theta):
+        ct = np.cos(theta)
+        st = np.sin(theta)
+        ca = np.cos(alpha)
+        sa = np.sin(alpha)
+        return np.array(
+            [
+                [ct, -st * ca, st * sa, a * ct],
+                [st, ct * ca, -ct * sa, a * st],
+                [0, sa, ca, d],
+                [0, 0, 0, 1],
+            ]
+        )
+
+    def forward_kinematics(self) -> PoseStamped:
+        joint_states: JointState = self._joint_states_manager.data
+
+        if joint_states is None:
+            self._node.get_logger().warn("JointState data not available yet.")
+            return None
+
+        # UR5e → DH 파라미터 순서로 재정렬
+        q = np.array(
+            [
+                joint_states.position[5],
+                joint_states.position[0],
+                joint_states.position[1],
+                joint_states.position[2],
+                joint_states.position[3],
+                joint_states.position[4],
+            ]
+        )
+
+        # 누적 변환
+        T = np.eye(4)
+        for i in range(6):
+            a, d, alpha = self._dh_params[i]
+            T = T @ self.dh_transform(a, d, alpha, q[i])
+
+        # 그리퍼(고정 오프셋) 적용
+        T_grip = np.eye(4)
+        T_grip[:3, 3] = self._gripper_offset
+        T_eef = T @ T_grip
+
+        T_correction = np.diag([-1, -1, 1, 1])  # x, y 반전
+
+        # 변환된 자코비안
+        T_eef_corrected = T_correction @ T_eef
+
+        # ----------------- Pose 메시지로 변환 -----------------
+        rotation_matrix = T_eef_corrected[:3, :3]
+        qx, qy, qz, qw = rotutils.quaternion_from_rotation_matrix(
+            rotation_matrix=rotation_matrix
+        )
+
+        result = PoseStamped(
+            header=Header(
+                frame_id="world", stamp=self._node.get_clock().now().to_msg()
+            ),
+            pose=Pose(
+                position=Point(
+                    x=T_eef_corrected[0, 3],
+                    y=T_eef_corrected[1, 3],
+                    z=T_eef_corrected[2, 3],
+                ),
+                orientation=Quaternion(x=qx, y=qy, z=qz, w=qw),
+            ),
+        )
+
+        return result
+
+    def _compute_jacobian(self) -> np.ndarray:
+        joint_states: JointState = self._joint_states_manager.data
+
+        if joint_states is None:
+            self._node.get_logger().warn("JointState data not available yet.")
+            return None
+
+        q = np.array(
+            [
+                joint_states.position[5],
+                joint_states.position[0],
+                joint_states.position[1],
+                joint_states.position[2],
+                joint_states.position[3],
+                joint_states.position[4],
+            ]
+        )
+
+        T = np.eye(4)
+        origins = [T[:3, 3]]
+        z_axes = [T[:3, 2]]
+
+        # 누적 T, z축, origin
+        for i in range(6):
+            a, d, alpha = self._dh_params[i]
+            Ti = EEFManager.dh_transform(a, d, alpha, q[i])
+            T = T @ Ti
+            origins.append(T[:3, 3])
+            z_axes.append(T[:3, 2])
+
+        # gripper_link offset
+        T_grip = np.eye(4)
+        T_grip[:3, 3] = self._gripper_offset  # Adjusted for gripper offset
+        T = T @ T_grip
+
+        o_e = T[:3, 3]
+
+        J = np.zeros((6, 6))
+        for i in range(6):
+            zi = z_axes[i]
+            oi = origins[i]
+            J[:3, i] = np.cross(zi, o_e - oi)
+            J[3:, i] = zi
+
+        T_correction = np.eye(6)
+        T_correction[0, 0] = -1  # x 반전
+        T_correction[1, 1] = -1  # y 반전
+
+        # 변환된 자코비안
+        J_corrected = T_correction @ J
+
+        return J_corrected
 
 
-def parse_np_path_to_pose_array(
-    path: np.ndarray, z: float, orientation: Quaternion
-) -> PoseArray:
-    """
-    Converts a numpy array path to a ROS PoseArray message.
-    """
-    pose_array = []
+class PI_Controller(object):
+    def __init__(self, kp: float, ki: float, dt: float, max_error: float = 1.0):
+        self._kp = kp
+        self._ki = ki
+        self._dt = dt
 
-    for point in path:
-        pose = Pose()
-        pose.position.x = point[0]
-        pose.position.y = point[1]
-        pose.position.z = z  # Assuming a flat plane
-        pose.orientation = orientation  # Use a fixed orientation
+        self._max_error = max_error
+        self._last_error = 0.0  # Last error value
 
-        pose_array.append(pose)
+        self._integral = 0.0
 
-    return pose_array
+    def compute(self, error: float) -> float:
+        """
+        Compute the control output using PI control.
+        """
+
+        integral = 0.0
+
+        # If the error is same as the last error, do not update the integral
+        if error != self._last_error:
+            integral = error * self._dt
+
+        self._integral = np.clip(
+            self._integral + integral, -self._max_error, self._max_error
+        )
+
+        self._last_error = error
+
+        return np.clip(
+            self._kp * error + self._ki * self._integral,
+            -self._max_error,
+            self._max_error,
+        )
 
 
-def parse_np_path_to_pose_array_with_z_curve(
-    path: np.ndarray, start_z: float, end_z: float, orientation: Quaternion
-) -> list[Pose]:
-    """
-    Converts a numpy array path to a list of ROS Pose messages.
-    The Z value is interpolated along a log-like curve from start_z to end_z.
-    """
-    n_points = len(path)
-    pose_array = []
+class PathTrackingManager(object):
+    def __init__(self, node: Node):
+        self._node = node
 
-    # Create log-shaped curve: values from 0 to 1, then scaled to [start_z, end_z]
-    t = np.linspace(0, 1, n_points)
-    curve = np.log1p(9 * t) / np.log1p(9)  # log1p for numerical stability
+        self._pi_controller = PI_Controller(
+            kp=1.0,  # Proportional gain
+            ki=0.1,  # Integral gain
+            dt=0.1,  # Time step
+            max_error=np.pi / 4.0,  # Maximum error (45 degrees/sec)
+        )
 
-    z_values = start_z + curve * (end_z - start_z)
+        self._path: np.ndarray = None
+        self._directions: np.ndarray = None
 
-    for i, point in enumerate(path):
-        pose = Pose()
-        pose.position.x = point[0]
-        pose.position.y = point[1]
-        pose.position.z = z_values[i]
-        pose.orientation = orientation
-        pose_array.append(pose)
+    @staticmethod
+    def parse_np_path_to_ros_path(path: np.ndarray, z: float, header: Header) -> Path:
+        """
+        Converts a numpy array path to a ROS Path message.
+        """
+        ros_path = Path()
+        ros_path.header = header
 
-    return pose_array
+        for point in path:
+            pose = PoseStamped()
+            pose.header = header
+            pose.pose.position.x = point[0]
+            pose.pose.position.y = point[1]
+            pose.pose.position.z = z  # Assuming a flat plane
+            ros_path.poses.append(pose)
+
+        return ros_path
+
+    @staticmethod
+    def generate_parabolic_path(
+        x_start, y_start, x_offset=0.05, y_offset=-0.2, num_points=100
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        x, y: 시작점 좌표
+        num_points: 보간 점 개수
+        x_offset: x의 최대 변위 (포물선 폭)
+        """
+
+        # y 값 보간 (선형)
+        y_end = y_start + y_offset
+        y_values = np.linspace(y_start, y_end, num_points)
+
+        # 포물선 중심 y (x 최대값을 가지는 지점)
+        y_mid = (y_start + y_end) / 2.0
+
+        # 포물선 계수 a 계산: x = -a * (y - y_mid)^2 + x + x_offset
+        a = x_offset / ((y_start - y_mid) ** 2)
+
+        # x 값 생성 (포물선)
+        x_values = -a * (y_values - y_mid) ** 2 + x_start + x_offset
+
+        # path 생성
+        path = np.vstack((x_values, y_values)).T
+
+        # 방향 벡터 계산
+        directions = np.zeros_like(path)
+        directions[1:-1] = path[2:] - path[:-2]
+        directions[0] = path[1] - path[0]
+        directions[-1] = path[-1] - path[-2]
+
+        # 단위 벡터화
+        norms = np.linalg.norm(directions, axis=1, keepdims=True)
+        directions = directions / norms
+
+        return path, directions
+
+    @staticmethod
+    def get_closest_index(
+        last_index: int, window_size: int, path: np.ndarray, position: np.ndarray
+    ) -> int:
+        low = max(0, last_index - window_size)
+        high = min(len(path), last_index + window_size)
+
+        dists = np.linalg.norm(path[low:high] - position, axis=1)
+        idx_rel = np.argmin(dists)
+        idx = low + idx_rel
+
+        # distances = np.linalg.norm(path - position, axis=1)
+        # idx = np.argmin(distances)
+
+        return idx
+
+    @staticmethod
+    def get_target_point_and_direction(
+        path: np.ndarray, direction: np.ndarray, index: int, lookup_index: int = 1
+    ) -> Tuple[np.ndarray, np.ndarray | None]:
+        """
+        Returns the target point and direction at the given index.
+        """
+        if path is None or index < 0 or index >= len(path):
+            raise IndexError("Path not created or index out of range.")
+
+        if index + lookup_index > len(path) - 1:
+            return path[index], direction[index]
+        else:
+            return (path[index + lookup_index], direction[index + lookup_index])
+
+    def tracking(self, current_position: np.ndarray, current_direction: np.ndarray):
+        # 1. Calculate the closest point on the path. and get the index
+        closest_index = np.argmin(np.linalg.norm(self._path - current_position, axis=1))
+
+        # 2. Get the target point and direction
+        _, target_direction = self.get_target_point_and_direction(
+            closest_index, lookup_index=1
+        )
+
+        # 3. Calculate the angle error
+        current_angle = np.arctan2(
+            current_direction[1], current_direction[0]
+        )  # Current direction angle
+
+        target_angle = np.arctan2(
+            target_direction[1], target_direction[0]
+        )  # Target direction angle
+
+        angle_error = target_angle - current_angle
+
+        # 4. Calculate the control output using the PI controller
+        control_output = self._pi_controller.compute(angle_error)
+
+        # 5. Return the control output
+        return control_output
+
+
+class Status(Enum):
+    WAITING = 0
+    PLANNING = 1
+    EXECUTING = 2
+    SWEEPING = 3
+    HOMING = 4
+    END = 5
+    TEST = 999
+    TESTEND = 1000
 
 
 class MainNode(Node):
     def __init__(self):
         super().__init__("robot_control_node")
 
+        # >>> State Machine Initialization >>>
         self._status = Status.WAITING
         self._methods = {
             Status.WAITING: self._waiting,
             Status.PLANNING: self._planning,
             Status.EXECUTING: self._executing,
-            Status.SWEEPIING: self._sweeping,
+            Status.SWEEPING: self._sweeping_velocity,
             Status.HOMING: self._homing,
             Status.END: self._end,
+            Status.TEST: self._test,  # Test state for debugging
+            Status.TESTEND: self._end,  # Test end state for debugging
         }
+        # <<< State Machine Initialization <<<
 
-        # Initialize the potential field planner
+        # >>> Potential Field Path Planner >>>
         self._pf_planner = PotentialFieldPlanner(
             rr=0.08,  # robot radius [m]
             resolution=0.02,  # grid resolution [m]
@@ -266,11 +586,9 @@ class MainNode(Node):
             area_offset=1.0,  # potential area width [m]
             oscillations=3,  # number of previous positions to check for oscillations
         )
+        # <<< Potential Field Path Planner <<<
 
-        # Initialize the object transform manager
-        self._object_transform_manager = ObjectTransformManager(self)
-
-        # >>> MoveIt2 Service Managers
+        # >>> MoveIt2 Service Managers >>>
         self._fk_manager = FK_ServiceManager(self)
         self._ik_manager = IK_ServiceManager(self)
         self._get_planning_scene_manager = GetPlanningScene_ServiceManager(self)
@@ -282,18 +600,19 @@ class MainNode(Node):
             self, planning_group="ur_manipulator"
         )
         self._execute_trajectory_manager = ExecuteTrajectory_ServiceManager(self)
-        # <<< MoveIt2 Service Managers
+        # <<< MoveIt2 Service Managers <<<
+
+        # >>> Manager >>>
+        self._object_transform_manager = ObjectTransformManager(self)
+        self._controller_switcher = ControllerSwitcher(node=self)
+        self._path_tracking_manager = PathTrackingManager(node=self)
+        self._eef_manager = EEFManager(node=self)
+        self._joint_state_manager = SimpleSubscriberManager(
+            node=self, topic_name="/joint_states", msg_type=JointState
+        )
+        # <<< Manager <<<
 
         # >>> Parameters >>>
-        self._fk_pose: PoseStamped = None
-        self._pfp_path: np.ndarray = None
-        self._z0 = 0.2549  # Initial Z position of the end effector
-        self._z = 0.2549 + 0.1
-        # <<< Parameters <<<
-
-        self._joint_state_manager = JointStateManager(self)
-
-        # >>> Unique Joint States >>>
         self._home_joints = JointState(
             name=[
                 "shoulder_lift_joint",
@@ -312,29 +631,68 @@ class MainNode(Node):
                 0.0,
             ],
         )
+        self._home_pose: PoseStamped = None
+        self._pfp_path: np.ndarray = None
+        self._z0 = 0.2549  # Initial Z position of the end effector
+        self._z = self._z0 + 0.1
+        # <<< Parameters <<<
 
-        # Create a publisher
+        # >>> ROS Publishers >>>
         self._marker_publisher = self.create_publisher(
-            MarkerArray, "/obstacle_markers", qos_profile=qos_profile_system_default
+            MarkerArray,
+            self.get_name() + "/obstacle_markers",
+            qos_profile=qos_profile_system_default,
         )
         self._path_publisher = self.create_publisher(
-            Path, "/planned_path", qos_profile=qos_profile_system_default
+            Path,
+            self.get_name() + "/planned_path",
+            qos_profile=qos_profile_system_default,
+        )
+        self._cmd_publication = self.create_publisher(
+            Float64MultiArray,
+            "/forward_velocity_controller/commands",
+            qos_profile=qos_profile_system_default,
         )
 
-        # self._timer = self.create_timer(0.5, self.run)
-
     def run(self):
-        self._methods[self._status]()
+        # self.get_logger().info(f"Running state machine in status: {self._status.name}")
+        try:
+            self._methods[self._status]()
+        except ValueError as ve:
+            self.get_logger().warn(f"Error in state machine: {ve}")
+            return None
+        except Exception as e:
+            self.get_logger().error(f"Unexpected error: {e}")
+            return None
 
     def _update_status(self):
+        # 1. Update the status based on the current mode
         self._status = Status(self._status.value + 1)
 
-        # if self._status == Status.HOMING:
-        #     self._status = Status.WAITING
-        #     self.get_logger().info("Homing completed. Status set to WAITING.")
+        if self._status == Status.END:
+            self.get_logger().info("Ending the state machine.")
+            return None
 
-        # else:
-        #     self._status = Status(self._status.value + 1)
+        if self._status == Status.TESTEND:
+            self.get_logger().info("Test end state reached.")
+            return None
+
+        # 2. Check current mode
+        if self._status == Status.EXECUTING or self._status == Status.HOMING:
+            self._controller_switcher.change_controller_state(
+                {
+                    "activate_controllers": ["scaled_joint_trajectory_controller"],
+                    "deactivate_controllers": ["forward_velocity_controller"],
+                }
+            )
+
+        elif self._status == Status.SWEEPING:
+            self._controller_switcher.change_controller_state(
+                {
+                    "activate_controllers": ["forward_velocity_controller"],
+                    "deactivate_controllers": ["scaled_joint_trajectory_controller"],
+                }
+            )
 
         return self._status.value
 
@@ -343,45 +701,64 @@ class MainNode(Node):
         """
         1. Get FK Position
         """
-        if self._joint_state_manager.joint_states is None:
+        if self._joint_state_manager.data is None:
             self.get_logger().warn("Joint states not available yet.")
             return None
 
-        try:
-            print("Calculating FK Pose...")
+        self.get_logger().info("Calculating FK Pose...")
 
-            self._fk_pose: PoseStamped = self._fk_manager.run(
-                # joint_states=self._joint_state_manager.joint_states,
-                joint_states=self._home_joints,  # Use home joints for FK
-                end_effector="gripper_link",
-            )
+        self._home_pose: PoseStamped = self._fk_manager.run(
+            # joint_states=self._joint_state_manager.joint_states,
+            joint_states=self._home_joints,  # Use home joints for FK
+            end_effector="gripper_link",
+        )
 
-            traj: RobotTrajectory = self._cartesian_path_manager.run(
-                header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
-                waypoints=[self._fk_pose.pose],
-                joint_states=self._joint_state_manager.joint_states,
-                end_effector="gripper_link",
-            )
+        self.get_logger().info(
+            f"FK Pose: {self._home_pose.pose.position.x:.3f}, {self._home_pose.pose.position.y:.3f}, {self._home_pose.pose.position.z:.3f}"
+        )
 
-            if traj is not None:
-                scaled_traj = self._execute_trajectory_manager.scale_trajectory(
-                    trajectory=traj,
-                    scale_factor=0.7,  # Scale down the trajectory for FK pose
-                )
+        if self._home_pose is None:
+            raise ValueError("FK Pose could not be calculated.")
 
-                self._execute_trajectory_manager.run(
-                    trajectory=scaled_traj,
-                )
+        self.get_logger().info("Calculating Path to Home Position...")
 
-                self.get_logger().info(
-                    f"FK Pose: {self._fk_pose.pose.position.x:.3f}, {self._fk_pose.pose.position.y:.3f}, {self._fk_pose.pose.position.z:.3f}"
-                )
+        goal_constraints = self._kinematic_path_manager.get_goal_constraint(
+            goal_joint_states=self._home_joints, tolerance=0.05
+        )
 
-                self._update_status()
+        traj: RobotTrajectory = self._kinematic_path_manager.run(
+            goal_constraints=[goal_constraints],
+            path_constraints=None,
+            joint_states=self._joint_state_manager.data,
+            num_planning_attempts=50,
+        )
 
-        except Exception as e:
-            self.get_logger().error(f"FK calculation failed: {e}")
-            return None
+        # traj: RobotTrajectory = self._cartesian_path_manager.run(
+        #     header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+        #     waypoints=[self._home_pose.pose],
+        #     joint_states=self._joint_state_manager.joint_states,
+        #     end_effector="gripper_link",
+        # )
+
+        self.get_logger().info("Path to Home Position calculated.")
+
+        if traj is None:
+            raise ValueError("Trajectory could not be calculated.")
+
+        scaled_traj = self._execute_trajectory_manager.scale_trajectory(
+            trajectory=traj,
+            scale_factor=0.7,  # Scale down the trajectory for FK pose
+        )
+
+        self.get_logger().info("Running Trajectory to Home Position...")
+
+        self._execute_trajectory_manager.run(
+            trajectory=scaled_traj,
+        )
+
+        self._update_status()
+
+        return True
 
     def _planning(self):
         """
@@ -390,197 +767,356 @@ class MainNode(Node):
         - Goal: user-defined goal pose
         - Obstacles: user-defined obstacles
         """
+        if self._object_transform_manager.data is None:
+            # ONLY FOR ISSAC SIM
+            raise ValueError("Object transform data not available.")
 
-        try:
-            if self._object_transform_manager.data is None:
-                raise ValueError("Object transform data not available.")
-
-            start_point = PotentialPoint(
-                x=self._fk_pose.pose.position.x,
-                y=self._fk_pose.pose.position.y,
-            )
-            goal_point = PotentialPoint(
+        # Start and Goal Points for Potential Field Planner
+        start_point = PotentialPoint(
+            x=self._home_pose.pose.position.x,
+            y=self._home_pose.pose.position.y,
+        )
+        goal_point = PotentialPoint(
+            x=self._object_transform_manager.data.pose.position.x,
+            y=self._object_transform_manager.data.pose.position.y + 0.15,
+        )
+        obstacles = [
+            PotentialObstacle(
                 x=self._object_transform_manager.data.pose.position.x,
-                y=self._object_transform_manager.data.pose.position.y + 0.15,
-            )  # Example goal point
+                y=self._object_transform_manager.data.pose.position.y,
+                r=0.03,
+            ),
+        ]
 
-            print(f"Start Point: {start_point.x}, {start_point.y}")
-            print(f"Goal Point: {goal_point.x}, {goal_point.y}")
-
-            obstacles = [
-                PotentialObstacle(
-                    x=self._object_transform_manager.data.pose.position.x,
-                    y=self._object_transform_manager.data.pose.position.y,
-                    r=0.02,
-                ),
-            ]
-
-            self._pfp_path = self._pf_planner.planning(
-                start=start_point,
-                goal=goal_point,
-                obstacles=obstacles,
+        self.get_logger().info("Planning Path with Potential Field Planner...")
+        self.get_logger().info(f"Start Point: {start_point.x:.3f}, {start_point.y:.3f}")
+        self.get_logger().info(f"Goal Point: {goal_point.x:.3f}, {goal_point.y:.3f}")
+        for obs_id in range(len(obstacles)):
+            self.get_logger().info(
+                f"Obstacle Point: {obstacles[obs_id].x:.3f}, {obstacles[obs_id].y:.3f}, Radius: {obstacles[obs_id].r:.3f}"
             )
 
-            self._marker_publisher.publish(
-                parse_obstacles_to_marker_array(
-                    obstacles,
-                    self._fk_pose.pose.position.z,
-                    Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
-                )
-            )
-            self._path_publisher.publish(
-                parse_np_path_to_path(
-                    self._pfp_path,
-                    self._z,
-                    # self._fk_pose.pose.position.z,
-                    Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
-                )
-            )
+        self._pfp_path: np.ndarray = self._pf_planner.planning(
+            start=start_point,
+            goal=goal_point,
+            obstacles=obstacles,
+        )
 
-            print("Planning completed.")
+        self.get_logger().info(
+            f"Planning Finished! - Path: {len(self._pfp_path)} points."
+        )
 
-            self._update_status()
+        # Publish the path and obstacles (Visualization)
+        obstacle_msg: MarkerArray = self._pf_planner.parse_obstacles_to_marker_array(
+            obstacles,
+            self._home_pose.pose.position.z,
+            Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+        )
+        path_msg: Path = self._pf_planner.parse_np_path_to_path(
+            self._pfp_path,
+            self._z,
+            Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+        )
 
-        except Exception as e:
-            self.get_logger().error(f"Planning failed: {e}")
-            return None
+        for _ in range(10):
+            self._marker_publisher.publish(obstacle_msg)
+            self._path_publisher.publish(path_msg)
+
+        self._update_status()
 
     def _executing(self):
         """
         3. Execute Path (Cartesian Path)
         """
-        try:
-            sliced_path = np.vstack(
-                [self._pfp_path[::50], self._pfp_path[-1]]
-            )  # Slicing the path for execution
+        sliced_path = np.vstack(
+            [self._pfp_path[::50], self._pfp_path[-1]]
+        )  # Slicing the path for execution
 
-            poses = parse_np_path_to_pose_array_with_z_curve(
-                sliced_path,
-                start_z=self._fk_pose.pose.position.z,
-                end_z=self._z,  # Assuming the end Z is the same as the initial Z
-                orientation=self._fk_pose.pose.orientation,
-            )
+        poses: List[Pose] = self._pf_planner.parse_np_path_to_pose_array_with_z_curve(
+            sliced_path,
+            start_z=self._home_pose.pose.position.z,
+            end_z=self._z,  # Assuming the end Z is the same as the initial Z
+            orientation=self._home_pose.pose.orientation,
+        )
 
-            # poses = parse_np_path_to_pose_array(
-            #     sliced_path,
-            #     self._z,
-            #     # self._fk_pose.pose.position.z,
-            #     self._fk_pose.pose.orientation,
-            # )
+        self.get_logger().info(
+            f"Calculating Cartesian Path with {len(poses)} waypoints..."
+        )
 
-            traj: RobotTrajectory = self._cartesian_path_manager.run(
-                header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
-                waypoints=poses,
-                end_effector="gripper_link",
-                joint_states=self._joint_state_manager.joint_states,
-            )
+        traj: RobotTrajectory = self._cartesian_path_manager.run(
+            header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+            waypoints=poses,
+            end_effector="gripper_link",
+            joint_states=self._joint_state_manager.data,
+        )
 
-            last_traj: JointTrajectoryPoint = traj.joint_trajectory.points[-1]
+        last_traj: JointTrajectoryPoint = traj.joint_trajectory.points[-1]
 
-            execution_time = last_traj.time_from_start
-            execution_time_float = execution_time.sec + execution_time.nanosec * 1e-9
+        execution_time = last_traj.time_from_start
+        execution_time_float = execution_time.sec + execution_time.nanosec * 1e-9
 
-            target_execution_time = 2.0
-            executution_time_ratio = execution_time_float / target_execution_time
-            # executution_time_ratio = 0.2  # No scaling for now
+        target_execution_time = 5.0  # User-defined target execution time in seconds
+        executution_time_ratio = execution_time_float / target_execution_time
+        # executution_time_ratio = 0.2  # User-defined scale factor for execution time
 
-            if traj is not None:
-                scaled_traj = self._execute_trajectory_manager.scale_trajectory(
-                    trajectory=traj,
-                    scale_factor=executution_time_ratio,
-                )
+        if traj is None:
+            raise ValueError("Trajectory could not be calculated.")
 
-                self._execute_trajectory_manager.run(
-                    trajectory=scaled_traj,
-                )
+        self.get_logger().info(
+            f"Trajectory calculated with {len(traj.joint_trajectory.points)} points."
+        )
+        self.get_logger().info(
+            f"Scaling the Trajectory - Execution Time: {execution_time_float:.2f} seconds, Scale Factor: {executution_time_ratio:.2f}"
+        )
 
-                self._update_status()
+        scaled_traj = self._execute_trajectory_manager.scale_trajectory(
+            trajectory=traj,
+            scale_factor=executution_time_ratio,
+        )
 
-        except Exception as e:
-            self.get_logger().error(f"Execution failed: {e}")
-            return None
+        self.get_logger().info("Running Scaled Trajectory...")
+
+        self._execute_trajectory_manager.run(
+            trajectory=scaled_traj,
+        )
+
+        self._update_status()
 
     def _sweeping(self):
-        try:
-            start_pose: PoseStamped = self._fk_manager.run(
-                joint_states=self._joint_state_manager.joint_states,
-                end_effector="gripper_link",
-            )
+        # Current EEF pose
+        start_pose: PoseStamped = self._fk_manager.run(
+            joint_states=self._joint_state_manager.data,
+            end_effector="gripper_link",
+        )
 
-            end_pose = PoseStamped(
-                header=start_pose.header,
-                pose=Pose(
-                    position=Point(
-                        x=start_pose.pose.position.x,
-                        y=start_pose.pose.position.y - 0.3,
-                        z=start_pose.pose.position.z,
-                    ),
-                    orientation=start_pose.pose.orientation,
+        # END pose for sweeping : 0.3m right from the start pose
+        end_pose = PoseStamped(
+            header=start_pose.header,
+            pose=Pose(
+                position=Point(
+                    x=start_pose.pose.position.x,
+                    y=start_pose.pose.position.y - 0.3,
+                    z=start_pose.pose.position.z,
                 ),
-            )
+                orientation=start_pose.pose.orientation,
+            ),
+        )
 
-            traj: RobotTrajectory = self._cartesian_path_manager.run(
-                header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
-                waypoints=[start_pose.pose, end_pose.pose],
-                joint_states=self._joint_state_manager.joint_states,
-                end_effector="gripper_link",
-            )
+        self.get_logger().info(
+            f"Start Pose: {start_pose.pose.position.x:.3f}, {start_pose.pose.position.y:.3f}, {start_pose.pose.position.z:.3f}"
+        )
+        self.get_logger().info(
+            f"End Pose: {end_pose.pose.position.x:.3f}, {end_pose.pose.position.y:.3f}, {end_pose.pose.position.z:.3f}"
+        )
+        self.get_logger().info("Calculating Cartesian Path for Sweeping...")
 
-            if traj is not None:
-                scaled_traj = self._execute_trajectory_manager.scale_trajectory(
-                    trajectory=traj,
-                    scale_factor=0.7,  # Scale down the trajectory for sweeping
-                )
+        traj: RobotTrajectory = self._cartesian_path_manager.run(
+            header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+            waypoints=[start_pose.pose, end_pose.pose],
+            joint_states=self._joint_state_manager.data,
+            end_effector="gripper_link",
+        )
 
-                self._execute_trajectory_manager.run(
-                    trajectory=scaled_traj,
-                )
+        if traj is None:
+            raise ValueError("Trajectory could not be calculated for sweeping.")
 
-                self.get_logger().info("Sweeping completed successfully.")
-                self._update_status()
+        scaled_traj = self._execute_trajectory_manager.scale_trajectory(
+            trajectory=traj,
+            scale_factor=0.5,  # Scale down the trajectory for sweeping
+        )
 
-        except Exception as e:
-            self.get_logger().error(f"Sweeping failed: {e}")
-            return None
+        self.get_logger().info(
+            f"Trajectory calculated with {len(traj.joint_trajectory.points)} points."
+        )
+        self.get_logger().info(f"Executing the scaled trajectory for sweeping")
+
+        self._execute_trajectory_manager.run(
+            trajectory=scaled_traj,
+        )
+
+        self.get_logger().info("Sweeping completed successfully.")
+
+        self._update_status()
 
     def _homing(self):
-        try:
-            home_joint_states = self._ik_manager.run(
-                pose_stamped=self._fk_pose,
-                joint_states=self._joint_state_manager.joint_states,
-                end_effector="gripper_link",
-            )
+        self.get_logger().info("Calculating Homing Trajectory...")
 
-            if home_joint_states is not None:
-                traj: RobotTrajectory = self._cartesian_path_manager.run(
-                    header=Header(
-                        frame_id="world", stamp=self.get_clock().now().to_msg()
-                    ),
-                    waypoints=[self._fk_pose.pose],
-                    joint_states=self._joint_state_manager.joint_states,
-                    end_effector="gripper_link",
-                )
+        traj: RobotTrajectory = self._cartesian_path_manager.run(
+            header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+            waypoints=[self._home_pose.pose],
+            joint_states=self._joint_state_manager.data,
+            end_effector="gripper_link",
+        )
 
-                if traj is not None:
+        if traj is None:
+            raise ValueError("Trajectory could not be calculated for homing.")
 
-                    scaled_traj = self._execute_trajectory_manager.scale_trajectory(
-                        trajectory=traj,
-                        scale_factor=0.7,  # Scale down the trajectory for homing
-                    )
+        self.get_logger().info(
+            f"Trajectory calculated with {len(traj.joint_trajectory.points)} points."
+        )
 
-                    self._execute_trajectory_manager.run(
-                        trajectory=scaled_traj,
-                    )
+        self.get_logger().info("Calculating scaled trajectory for homing...")
 
-                    self.get_logger().info("Homing completed successfully.")
-                    self._update_status()
+        scaled_traj = self._execute_trajectory_manager.scale_trajectory(
+            trajectory=traj,
+            scale_factor=0.7,  # Scale down the trajectory for homing
+        )
 
-        except Exception as e:
-            self.get_logger().error(f"Homing failed: {e}")
-            return None
+        self.get_logger().info("Running scaled trajectory for homing...")
+
+        self._execute_trajectory_manager.run(
+            trajectory=scaled_traj,
+        )
+
+        self.get_logger().info("Homing completed successfully.")
+
+        self._update_status()
 
     def _end(self):
         pass
+
+    def _test(self):
+        pass
+
+    def _sweeping_velocity(self):
+        """
+        4. Sweeping with velocity control
+        """
+        object_pose: PoseStamped = self._object_transform_manager.data
+
+        if object_pose is None:
+            raise ValueError("Object pose data not available.")
+
+        path, direction = self._path_tracking_manager.generate_parabolic_path(
+            x_start=object_pose.pose.position.x,
+            y_start=object_pose.pose.position.y,
+            x_offset=0.0,  # Offset for the parabolic path
+            y_offset=-0.2,  # Offset for the parabolic path
+            num_points=100,  # Number of points in the path
+        )
+
+        path_msg = self._path_tracking_manager.parse_np_path_to_ros_path(
+            path=path,
+            z=self._z,  # Assuming a flat plane at z = 0.2549 + 0.1
+            header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+        )
+        for _ in range(10):
+            self._path_publisher.publish(path_msg)
+
+        hz = 10.0
+        dt = 1.0 / hz  # Time step for the controller
+
+        def check_goal_reached(
+            current_position: Point, goal_point: Point, distance_threshold: float = 0.05
+        ) -> bool:
+
+            current_np_position = np.array([current_position.x, current_position.y])
+            goal_np_position = np.array([goal_point.x, goal_point.y])
+
+            distance = np.linalg.norm(current_np_position - goal_np_position)
+
+            if distance < distance_threshold:
+                self.get_logger().info(
+                    f"Goal reached! Current position: {current_position.x:.3f}, {current_position.y:.3f}"
+                )
+                return True
+
+            return False
+
+        target_idx = 0
+        last_idx = len(path) - 1
+        object_poses = deque(
+            maxlen=5
+        )  # Store last 5 object poses for direction calculation
+        object_pose: PoseStamped = self._object_transform_manager.data
+        object_poses.append(object_pose)
+
+        rate = self.create_rate(hz)
+        while rclpy.ok():
+            # y_control_msg = np.array(
+            #     [0.0, -0.05, 0.0, 0.0, 0.0, 0.0]
+            # )  # Always move to right (Initial velocity command)
+
+            eef_pose: PoseStamped = self._eef_manager.forward_kinematics()
+            object_pose: PoseStamped = self._object_transform_manager.data
+            target_idx = PathTrackingManager.get_closest_index(
+                last_index=target_idx,
+                window_size=10,  # Search window size for closest point
+                path=path,
+                position=np.array([eef_pose.pose.position.x, eef_pose.pose.position.y]),
+            )
+
+            target_np_pose, target_np_direction = (
+                PathTrackingManager.get_target_point_and_direction(
+                    path=path, direction=direction, index=target_idx, lookup_index=1
+                )
+            )
+            target_pose = PoseStamped()
+            target_pose.pose.position = Point(
+                x=target_np_pose[0], y=target_np_pose[1], z=self._z
+            )
+
+            past_object_pose: PoseStamped = object_poses[0]
+            object_direction = np.array(
+                [
+                    object_pose.pose.position.x - past_object_pose.pose.position.x,
+                    object_pose.pose.position.y - past_object_pose.pose.position.y,
+                ]
+            )
+            object_angle = np.arctan2(object_direction[1], object_direction[0])
+            target_angle = np.arctan2(target_np_direction[1], target_np_direction[0])
+            angle_diff = (
+                (target_angle - object_angle)
+                if np.linalg.norm(object_direction) > 0.0003
+                else 0.0
+            )
+
+            object_poses.append(object_pose)
+
+            # print(target_idx, target_pose.pose.position.x, eef_pose.pose.position.x)
+            x_gain = 1.5
+
+            x_diff = target_pose.pose.position.x - eef_pose.pose.position.x
+            x_control_msg = np.array(
+                [x_diff * x_gain, 0.0, 0.0, 0.0, 0.0, 0.0]
+            )  # Move towards the object in x direction
+
+            y_gain = 1.5
+
+            y_diff = target_pose.pose.position.y - eef_pose.pose.position.y
+            y_control_msg = np.array([0.0, y_diff * y_gain, 0.0, 0.0, 0.0, 0.0])
+
+            angle_gain = 1.0
+            angle_control_msg = np.clip(
+                np.array([0.0, 0.0, 0.0, 0.0, 0.0, angle_diff * angle_gain]), -0.2, 0.2
+            )
+
+            control_msg = y_control_msg + x_control_msg
+            normalized_control_msg = (
+                (control_msg / np.linalg.norm(control_msg)) * 0.05
+            ) + angle_control_msg
+
+            J_inv = np.linalg.pinv(self._eef_manager.J)
+            joint_control_msg = (J_inv @ normalized_control_msg).tolist()
+
+            self._cmd_publication.publish(Float64MultiArray(data=joint_control_msg))
+
+            self.get_logger().info(f"CMD: {control_msg}")
+
+            if target_idx == last_idx:
+                self.get_logger().info(
+                    f"Reached the end of the path at index {target_idx}."
+                )
+
+                for _ in range(30):
+                    self._cmd_publication.publish(
+                        Float64MultiArray(data=[0.0] * 6)
+                    )  # Stop the robot
+
+                self._update_status()
+                break
+
+            rate.sleep()
 
     # <<< State Machine Methods
 
@@ -594,7 +1130,7 @@ def main():
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
 
-    hz = 1.0  # Frequency in Hz
+    hz = 10.0  # Frequency in Hz
     rate = node.create_rate(hz)
 
     try:

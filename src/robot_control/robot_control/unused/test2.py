@@ -63,7 +63,7 @@ class RobotControlNode(Node):
             self._joint_state.position[3],
             self._joint_state.position[4],
         ]
-        new_joint[0] += -np.deg2rad(9) / 10.0 * 2.0
+        new_joint[0] += np.deg2rad(30) * 0.1
 
         self.rtde_c.moveJ(new_joint, asynchronous=True)
 

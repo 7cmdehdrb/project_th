@@ -377,6 +377,89 @@ class PotentialFieldPlanner:
 
     # <<< Path Planning <<<
 
+    @staticmethod
+    def parse_obstacles_to_marker_array(
+        obstacles: List[PotentialObstacle], z: float, header: Header
+    ) -> MarkerArray:
+        marker_array = MarkerArray()
+
+        for i, obstacle in enumerate(obstacles):
+            obstacle: PotentialObstacle
+
+            marker = Marker()
+            marker.header = header
+            marker.id = i
+            marker.type = Marker.CYLINDER
+            marker.action = Marker.ADD
+            marker.pose.position.x = obstacle.x
+            marker.pose.position.y = obstacle.y
+            marker.pose.position.z = 0.25 + 0.05
+            marker.scale.x = obstacle.r
+            marker.scale.y = obstacle.r
+            marker.scale.z = 0.12
+
+            marker.color.r = 0.0
+            marker.color.g = 1.0
+            marker.color.b = 0.0
+            marker.color.a = 0.3  # Fully opaque
+
+            marker_array.markers.append(marker)
+
+        return marker_array
+
+    @staticmethod
+    def parse_np_path_to_path(np_path: np.ndarray, z: float, header: Header) -> Path:
+        """
+        Convert a numpy array path to a ROS Path message.
+
+        Parameters:
+        - np_path: A 2D numpy array of shape (N, 2) representing the path points.
+        - z: The z-coordinate for all points in the path.
+        - header: The header for the Path message.
+
+        Returns:
+        - path_msg: A ROS Path message containing the path points.
+        """
+        path_msg = Path()
+        path_msg.header = header
+
+        for point in np_path:
+            pose = PoseStamped()
+            pose.header = header
+            pose.pose.position.x = point[0]
+            pose.pose.position.y = point[1]
+            pose.pose.position.z = z
+            path_msg.poses.append(pose)
+
+        return path_msg
+
+    @staticmethod
+    def parse_np_path_to_pose_array_with_z_curve(
+        path: np.ndarray, start_z: float, end_z: float, orientation: Quaternion
+    ) -> list[Pose]:
+        """
+        Converts a numpy array path to a list of ROS Pose messages.
+        The Z value is interpolated along a log-like curve from start_z to end_z.
+        """
+        n_points = len(path)
+        pose_array = []
+
+        # Create log-shaped curve: values from 0 to 1, then scaled to [start_z, end_z]
+        t = np.linspace(0, 1, n_points)
+        curve = np.log1p(9 * t) / np.log1p(9)  # log1p for numerical stability
+
+        z_values = start_z + curve * (end_z - start_z)
+
+        for i, point in enumerate(path):
+            pose = Pose()
+            pose.position.x = point[0]
+            pose.position.y = point[1]
+            pose.position.z = z_values[i]
+            pose.orientation = orientation
+            pose_array.append(pose)
+
+        return pose_array
+
 
 def main2():
     pfp = PotentialFieldPlanner(

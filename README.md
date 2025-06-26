@@ -5,6 +5,10 @@
 ```bash
 ros2 control switch_controllers --deactivate scaled_joint_trajectory_controller --activate forward_position_controller
 ```
+```bash
+ros2 control switch_controllers --activate scaled_joint_trajectory_controller --deactivate forward_velocity_controller
+```
+
 ## Activate Trigger
 
 ```bash
@@ -14,7 +18,7 @@ ros2 service call /servo_node/start_servo std_srvs/srv/Trigger
 ## Publish Servo Message
 
 ```bash
-ros2 topic pub /servo_node/delta_twist_cmds geometry_msgs/msg/TwistStamped "{ header: { stamp: 'now', frame_id: 'world' },  twist: {linear: {x: -0.1}, angular: {  }}}" -r 10
+ros2 topic pub /servo_node/delta_twist_cmds geometry_msgs/msg/TwistStamped "{ header: { stamp: 'now', frame_id: 'base_link' },  twist: {linear: {x: -0.1}, angular: {  }}}" -r 10
 ```
 
 <hr>
@@ -44,11 +48,19 @@ ros2 launch realsense2_camera rs_launch.py camera_name:="camera2" pointcloud.ena
 ```bash
 ros2 launch ur_bringup ur_control.launch.py ur_type:=ur5e robot_ip:=192.168.2.2 launch_rviz:=false
 ```
+```bash
+ros2 launch ur_bringup ur_control.launch.py ur_type:=ur5e robot_ip:=192.168.56.101 launch_rviz:=false
+```
 
 ## 3. Launch UR Moveit
 
 ```bash
 ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur5e
+```
+
+```bash
+ros2 launch ur_moveit_with_gripper move_group.launch.py
+ros2 launch ur_moveit_with_gripper  rsp.launch.py
 ```
 
 ## 4. Launch YOLO Segmentation
