@@ -54,51 +54,75 @@ class ObjectTransformManager:
     def __init__(self, node: Node):
         self._node = node
 
-        self._sub = self._node.create_subscription(
-            TFMessage,
-            "/isaac_sim/tf/mug",
-            self._callback,
-            qos_profile_system_default,
-        )
-        self._pub = self._node.create_publisher(
+        self._transform_manager = TransformManager(node=self._node)
+
+        self._real_sub = self._node.create_subscription(
             PoseStamped,
-            "/isaac_sim/pose/mug",
+            "/kalman_filter_node/pose",
             qos_profile=qos_profile_system_default,
+            callback=self._real_pose_callback,
         )
+        # self._sim_sub = self._node.create_subscription(
+        #     TFMessage,
+        #     "/isaac_sim/tf/mug",
+        #     self._callback,
+        #     qos_profile_system_default,
+        # )
+        # self._pub = self._node.create_publisher(
+        #     PoseStamped,
+        #     "/isaac_sim/pose/mug",
+        #     qos_profile=qos_profile_system_default,
+        # )
 
         self._data: PoseStamped = None
-        self._direction: np.ndarray = None
 
-    @property
-    def direction(self) -> np.ndarray:
-        """
-        Returns the direction vector of the latest pose data.
-        If no data is available, returns a default direction.
-        """
-        return self._direction
+    # @property
+    # def data(self) -> PoseStamped:
+    #     """
+    #     Returns the latest pose data.
+    #     """
+    #     if self._data is None:
+    #         self._node.get_logger().warn("Pose data not yet received.")
+    #         return None
+
+    #     return self._data
 
     @property
     def data(self) -> PoseStamped:
-        """
-        Returns the latest pose data.
-        """
         if self._data is None:
             self._node.get_logger().warn("Pose data not yet received.")
             return None
 
-        return self._data
+        tf_pose = TF2PoseStamped(
+            header=self._data.header,
+            pose=self._data.pose,
+        )
 
-    def _publish_data(self, data: PoseStamped):
-        """
-        Publishes the pose data.
-        """
-        if data is not None:
-            self._pub.publish(data)
-        else:
-            self._node.get_logger().warn("No data to publish.")
+        transformed_tf_pose: PoseStamped = self._transform_manager.transform_pose(
+            tf_pose=tf_pose,
+            target_frame="world",
+            source_frame=self._data.header.frame_id,
+        )
 
-    def _callback(self, msg: TFMessage):
-        if len(msg.transforms) == 1:
+        return PoseStamped(
+            header=transformed_tf_pose.header,
+            pose=transformed_tf_pose.pose,
+        )
+
+    # def _publish_data(self, data: PoseStamped):
+    #     """
+    #     Publishes the pose data.
+    #     """
+    #     if data is not None:
+    #         self._pub.publish(data)
+    #     else:
+    #         self._node.get_logger().warn("No data to publish.")
+
+    def _real_pose_callback(self, msg: PoseStamped):
+        self._data = msg
+
+    # def _callback(self, msg: TFMessage):
+    #     if len(msg.transforms) == 1:
             transform: TransformStamped = msg.transforms[0]
 
             data = PoseStamped(
@@ -123,24 +147,9 @@ class ObjectTransformManager:
 
             if self._data is None:
                 self._data = data
-                self._direction = None
 
-            if data is not None:
-                direction = np.array(
-                    [
-                        data.pose.position.x - self._data.pose.position.x,
-                        data.pose.position.y - self._data.pose.position.y,
-                    ]
-                )
-
+            else:
                 self._data = data
-
-                self._direction = (
-                    direction / np.linalg.norm(direction)
-                    if np.linalg.norm(direction) > 0
-                    else None
-                )
-
                 self._publish_data(self._data)
 
 
