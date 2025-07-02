@@ -49,43 +49,97 @@ from path_planner.potential_field_path_planner import (
 from base_package.manager import SimpleSubscriberManager, TransformManager
 
 
-class ObjectTransformManager:
+class SimObjectTransformManager(object):
     # ONLY FOR ISSAC SIM
+    def __init__(self, node: Node):
+        self._node = node
+
+        self._sim_sub = self._node.create_subscription(
+            TFMessage,
+            "/isaac_sim/tf/mug",
+            self._callback,
+            qos_profile_system_default,
+        )
+        self._pub = self._node.create_publisher(
+            PoseStamped,
+            "/isaac_sim/pose/mug",
+            qos_profile=qos_profile_system_default,
+        )
+
+        self._data: PoseStamped = None
+
+    @property
+    def data(self) -> PoseStamped:
+        """
+        Returns the latest pose data.
+        """
+        if self._data is None:
+            self._node.get_logger().warn("Pose data not yet received.")
+            return None
+
+        return self._data
+
+    def _publish_data(self, data: PoseStamped):
+        """
+        Publishes the pose data.
+        """
+        if data is not None:
+            self._pub.publish(data)
+        else:
+            self._node.get_logger().warn("No data to publish.")
+
+    def _callback(self, msg: TFMessage):
+        if len(msg.transforms) == 1:
+            transform: TransformStamped = msg.transforms[0]
+
+            data = PoseStamped(
+                header=Header(
+                    frame_id="world",
+                    stamp=self._node.get_clock().now().to_msg(),
+                ),
+                pose=Pose(
+                    position=Point(
+                        x=transform.transform.translation.x,
+                        y=transform.transform.translation.y,
+                        z=transform.transform.translation.z,
+                    ),
+                    orientation=Quaternion(
+                        x=transform.transform.rotation.x,
+                        y=transform.transform.rotation.y,
+                        z=transform.transform.rotation.z,
+                        w=transform.transform.rotation.w,
+                    ),
+                ),
+            )
+
+            if self._data is None:
+                self._data = data
+
+            else:
+                self._data = data
+                self._publish_data(self._data)
+
+
+class ObjectTransformManager:
+    # ONLY FOR REAL ROBOT
     def __init__(self, node: Node):
         self._node = node
 
         self._transform_manager = TransformManager(node=self._node)
 
-        self._real_sub = self._node.create_subscription(
-            PoseStamped,
-            "/kalman_filter_node/pose",
-            qos_profile=qos_profile_system_default,
-            callback=self._real_pose_callback,
+        self._sim_sub = self._node.create_subscription(
+            TFMessage,
+            "/isaac_sim/tf/mug",
+            self._callback,
+            qos_profile_system_default,
         )
-        # self._sim_sub = self._node.create_subscription(
-        #     TFMessage,
-        #     "/isaac_sim/tf/mug",
-        #     self._callback,
-        #     qos_profile_system_default,
-        # )
-        # self._pub = self._node.create_publisher(
-        #     PoseStamped,
-        #     "/isaac_sim/pose/mug",
-        #     qos_profile=qos_profile_system_default,
-        # )
+        self._pub = self._node.create_publisher(
+            PoseStamped,
+            "/isaac_sim/pose/mug",
+            qos_profile=qos_profile_system_default,
+        )
 
         self._data: PoseStamped = None
-
-    # @property
-    # def data(self) -> PoseStamped:
-    #     """
-    #     Returns the latest pose data.
-    #     """
-    #     if self._data is None:
-    #         self._node.get_logger().warn("Pose data not yet received.")
-    #         return None
-
-    #     return self._data
 
     @property
     def data(self) -> PoseStamped:
@@ -109,48 +163,45 @@ class ObjectTransformManager:
             pose=transformed_tf_pose.pose,
         )
 
-    # def _publish_data(self, data: PoseStamped):
-    #     """
-    #     Publishes the pose data.
-    #     """
-    #     if data is not None:
-    #         self._pub.publish(data)
-    #     else:
-    #         self._node.get_logger().warn("No data to publish.")
+    def _publish_data(self, data: PoseStamped):
+        """
+        Publishes the pose data.
+        """
+        if data is not None:
+            self._pub.publish(data)
+        else:
+            self._node.get_logger().warn("No data to publish.")
 
-    def _real_pose_callback(self, msg: PoseStamped):
-        self._data = msg
+    def _callback(self, msg: TFMessage):
+        if len(msg.transforms) == 1:
+            transform: TransformStamped = msg.transforms[0]
 
-    # def _callback(self, msg: TFMessage):
-    #     if len(msg.transforms) == 1:
-    #         transform: TransformStamped = msg.transforms[0]
+            data = PoseStamped(
+                header=Header(
+                    frame_id="world",
+                    stamp=self._node.get_clock().now().to_msg(),
+                ),
+                pose=Pose(
+                    position=Point(
+                        x=transform.transform.translation.x,
+                        y=transform.transform.translation.y,
+                        z=transform.transform.translation.z,
+                    ),
+                    orientation=Quaternion(
+                        x=transform.transform.rotation.x,
+                        y=transform.transform.rotation.y,
+                        z=transform.transform.rotation.z,
+                        w=transform.transform.rotation.w,
+                    ),
+                ),
+            )
 
-    #         data = PoseStamped(
-    #             header=Header(
-    #                 frame_id="world",
-    #                 stamp=self._node.get_clock().now().to_msg(),
-    #             ),
-    #             pose=Pose(
-    #                 position=Point(
-    #                     x=transform.transform.translation.x,
-    #                     y=transform.transform.translation.y,
-    #                     z=transform.transform.translation.z,
-    #                 ),
-    #                 orientation=Quaternion(
-    #                     x=transform.transform.rotation.x,
-    #                     y=transform.transform.rotation.y,
-    #                     z=transform.transform.rotation.z,
-    #                     w=transform.transform.rotation.w,
-    #                 ),
-    #             ),
-    #         )
+            if self._data is None:
+                self._data = data
 
-    #         if self._data is None:
-    #             self._data = data
-
-    #         else:
-    #             self._data = data
-    #             self._publish_data(self._data)
+            else:
+                self._data = data
+                self._publish_data(self._data)
 
 
 class ControllerSwitcher(object):
@@ -500,6 +551,53 @@ class PathTrackingManager(object):
         return path, directions
 
     @staticmethod
+    def linear_path(
+        x_start: float,
+        y_start: float,
+        x_offset: float,
+        y_offset: float,
+        num_points: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate a linearly interpolated path from (x_start, y_start)
+        to (x_start + x_offset, y_start + y_offset) in a vectorized manner.
+
+        Args:
+            x_start (float): Starting x-coordinate.
+            y_start (float): Starting y-coordinate.
+            x_offset (float): Displacement in x from start to end.
+            y_offset (float): Displacement in y from start to end.
+            num_points (int): Number of points to generate along the path.
+
+        Returns:
+            np.ndarray: Array of shape (num_points, 2), each row [x_i, y_i].
+        """
+        if num_points < 1:
+            return np.empty((0, 2))
+
+        # Parameter t goes from 0 to 1 in num_points steps
+        t = np.linspace(0.0, 1.0, num_points)
+
+        # Vectorized interpolation
+        x_coords = x_start + t * x_offset
+        y_coords = y_start + t * y_offset
+
+        # Stack into (num_points, 2)
+        path = np.stack((x_coords, y_coords), axis=1)
+
+        # 방향 벡터 계산
+        directions = np.zeros_like(path)
+        directions[1:-1] = path[2:] - path[:-2]
+        directions[0] = path[1] - path[0]
+        directions[-1] = path[-1] - path[-2]
+
+        # 단위 벡터화
+        norms = np.linalg.norm(directions, axis=1, keepdims=True)
+        directions = directions / norms
+
+        return path, directions
+
+    @staticmethod
     def get_closest_index(
         last_index: int, window_size: int, path: np.ndarray, position: np.ndarray
     ) -> int:
@@ -612,7 +710,7 @@ class MainNode(Node):
         # <<< MoveIt2 Service Managers <<<
 
         # >>> Manager >>>
-        self._object_transform_manager = ObjectTransformManager(self)
+        self._object_transform_manager = SimObjectTransformManager(self)  # Sim Object
         self._controller_switcher = ControllerSwitcher(node=self)
         self._path_tracking_manager = PathTrackingManager(node=self)
         self._eef_manager = EEFManager(node=self)
@@ -950,12 +1048,26 @@ class MainNode(Node):
     def _homing(self):
         self.get_logger().info("Calculating Homing Trajectory...")
 
-        traj: RobotTrajectory = self._cartesian_path_manager.run(
-            header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
-            waypoints=[self._home_pose.pose],
+        traj: RobotTrajectory = self._kinematic_path_manager.run(
+            goal_constraints=[
+                self._kinematic_path_manager.get_goal_constraint(
+                    goal_joint_states=self._home_joints, tolerance=0.05
+                )
+            ],
+            path_constraints=None,
             joint_states=self._joint_state_manager.data,
-            end_effector="gripper_link",
+            num_planning_attempts=100,
+            allowed_planning_time=3.0,
+            max_velocity_scaling_factor=1.0,
+            max_acceleration_scaling_factor=1.0,
         )
+
+        # traj: RobotTrajectory = self._cartesian_path_manager.run(
+        #     header=Header(frame_id="world", stamp=self.get_clock().now().to_msg()),
+        #     waypoints=[self._home_pose.pose],
+        #     joint_states=self._joint_state_manager.data,
+        #     end_effector="gripper_link",
+        # )
 
         if traj is None:
             raise ValueError("Trajectory could not be calculated for homing.")
@@ -996,11 +1108,19 @@ class MainNode(Node):
         if object_pose is None:
             raise ValueError("Object pose data not available.")
 
-        path, direction = self._path_tracking_manager.generate_parabolic_path(
+        # path, direction = self._path_tracking_manager.generate_parabolic_path(
+        #     x_start=object_pose.pose.position.x,
+        #     y_start=object_pose.pose.position.y,
+        #     x_offset=0.03,  # Offset for the parabolic path
+        #     y_offset=-0.25,  # Offset for the parabolic path
+        #     num_points=100,  # Number of points in the path
+        # )
+
+        path, direction = self._path_tracking_manager.linear_path(
             x_start=object_pose.pose.position.x,
             y_start=object_pose.pose.position.y,
-            x_offset=0.0,  # Offset for the parabolic path
-            y_offset=-0.2,  # Offset for the parabolic path
+            x_offset=-0.05,  # Offset for the linear path
+            y_offset=-0.25,  # Offset for the linear path
             num_points=100,  # Number of points in the path
         )
 
@@ -1015,23 +1135,6 @@ class MainNode(Node):
         hz = 30.0
         dt = 1.0 / hz  # Time step for the controller
 
-        def check_goal_reached(
-            current_position: Point, goal_point: Point, distance_threshold: float = 0.05
-        ) -> bool:
-
-            current_np_position = np.array([current_position.x, current_position.y])
-            goal_np_position = np.array([goal_point.x, goal_point.y])
-
-            distance = np.linalg.norm(current_np_position - goal_np_position)
-
-            if distance < distance_threshold:
-                self.get_logger().info(
-                    f"Goal reached! Current position: {current_position.x:.3f}, {current_position.y:.3f}"
-                )
-                return True
-
-            return False
-
         target_idx = 0
         last_idx = len(path) - 1
         object_poses = deque(
@@ -1041,44 +1144,63 @@ class MainNode(Node):
         object_poses.append(object_pose)
 
         rate = self.create_rate(hz)
-        while rclpy.ok():
-            # y_control_msg = np.array(
-            #     [0.0, -0.05, 0.0, 0.0, 0.0, 0.0]
-            # )  # Always move to right (Initial velocity command)
 
+        while rclpy.ok():
             eef_pose: PoseStamped = self._eef_manager.forward_kinematics()
             object_pose: PoseStamped = self._object_transform_manager.data
+            object_np_pose = np.array(
+                [
+                    object_pose.pose.position.x,
+                    object_pose.pose.position.y,
+                ]
+            )
+
             target_idx = PathTrackingManager.get_closest_index(
                 last_index=target_idx,
                 window_size=10,  # Search window size for closest point
                 path=path,
-                position=np.array([eef_pose.pose.position.x, eef_pose.pose.position.y]),
+                position=np.array(
+                    [object_pose.pose.position.x, object_pose.pose.position.y]
+                ),
             )
-
             target_np_pose, target_np_direction = (
                 PathTrackingManager.get_target_point_and_direction(
                     path=path, direction=direction, index=target_idx, lookup_index=1
                 )
             )
-            target_pose = PoseStamped()
-            target_pose.pose.position = Point(
-                x=target_np_pose[0], y=target_np_pose[1], z=self._z
-            )
 
+            target_pose = PoseStamped(
+                pose=Pose(
+                    position=Point(x=target_np_pose[0], y=target_np_pose[1], z=self._z),
+                    orientation=Quaternion(
+                        x=0.0,
+                        y=0.0,
+                        z=0.0,
+                        w=1.0,  # Assuming no rotation for simplicity
+                    ),
+                )
+            )
             past_object_pose: PoseStamped = object_poses[0]
+
             object_direction = np.array(
                 [
                     object_pose.pose.position.x - past_object_pose.pose.position.x,
                     object_pose.pose.position.y - past_object_pose.pose.position.y,
                 ]
             )
+
             object_angle = np.arctan2(object_direction[1], object_direction[0])
             target_angle = np.arctan2(target_np_direction[1], target_np_direction[0])
-            angle_diff = (
-                (target_angle - object_angle)
-                if np.linalg.norm(object_direction) > 0.0003
-                else 0.0
+            eef_angle, _, _ = rotutils.euler_from_quaternion(
+                x=eef_pose.pose.orientation.x,
+                y=eef_pose.pose.orientation.y,
+                z=eef_pose.pose.orientation.z,
+                w=eef_pose.pose.orientation.w,
             )
+
+            is_contact = np.linalg.norm(object_direction) > 0.0003
+
+            angle_diff = (target_angle - object_angle) if is_contact else 0.0
 
             object_poses.append(object_pose)
 
@@ -1095,21 +1217,33 @@ class MainNode(Node):
             y_diff = target_pose.pose.position.y - eef_pose.pose.position.y
             y_control_msg = np.array([0.0, y_diff * y_gain, 0.0, 0.0, 0.0, 0.0])
 
-            angle_gain = 1.0
-            angle_control_msg = (
-                np.clip(
-                    np.array([0.0, 0.0, 0.0, 0.0, 0.0, angle_diff * angle_gain]),
-                    -0.2,
-                    0.2,
-                )
-                * 1.0
+            cte_vector = (
+                object_np_pose - target_np_pose
+            )  # currnet position - target position
+            cte = np.dot(cte_vector, target_np_direction)  # Cross-track error
+
+            cte_gain = 2.0 if is_contact else 0.0
+            cte_control_msg = np.clip(
+                np.array([0.0, 0.0, 0.0, 0.0, 0.0, cte * cte_gain]), -0.2, 0.2
+            )
+
+            angle_gain = (
+                1.0 if np.abs(eef_angle) < np.deg2rad(60) and is_contact else 0.0
+            )
+            angle_control_msg = np.clip(
+                np.array([0.0, 0.0, 0.0, 0.0, 0.0, angle_diff * angle_gain]),
+                -0.2,
+                0.2,
             )  # TODO: REMOVE 0.0
 
             control_msg = y_control_msg + x_control_msg
             normalized_control_msg = (
-                (control_msg / np.linalg.norm(control_msg)) * 0.03
-            ) + angle_control_msg
+                ((control_msg / np.linalg.norm(control_msg)) * 0.03)
+                + angle_control_msg
+                + cte_control_msg
+            )
 
+            # >>> Make Joint Control Message >>>
             J_inv = np.linalg.pinv(self._eef_manager.J)
             joint_control_msg = (J_inv @ normalized_control_msg).tolist()
 
