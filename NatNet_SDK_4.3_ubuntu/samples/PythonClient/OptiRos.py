@@ -31,6 +31,7 @@ from geometry_msgs.msg import *
 from sensor_msgs.msg import *
 from nav_msgs.msg import *
 from visualization_msgs.msg import *
+from builtin_interfaces.msg import Duration as DurationMsg
 
 # TF
 from tf2_ros import *
@@ -113,26 +114,22 @@ class NatNetClientNode(Node):
     def __init__(self, target_id: int):
         super().__init__("natnet_client_node")
 
-        self._target_id = target_id
+        self._markers = MarkerArray()
 
-        self._pose_publisher = self.create_publisher(
-            PoseStamped,
-            self.get_name() + "/pose",
+        self._marker_array_publisher = self.create_publisher(
+            MarkerArray,
+            self.get_name() + "/marker_array",
             qos_profile=qos_profile_system_default,
         )
 
-    def _publish_pose(self, pose_msg: PoseStamped):
-        self._pose_publisher.publish(pose_msg)
+        self._hz = 30.0  # Frequency of publishing markers
+        self._timer = self.create_timer(self._hz, self._publish_marker_array)
 
-    def receive_rigid_body_frame(
+    def _get_pose_msg(
         self,
-        new_id: str,
         position: Tuple[float, float, float],
         rotation: Tuple[float, float, float, float],
-    ):
-        if int(new_id) != self._target_id:
-            return None
-
+    ) -> PoseStamped:
         pose_msg = PoseStamped(
             header=Header(
                 frame_id="optitrack_world", stamp=self.get_clock().now().to_msg()
@@ -142,7 +139,64 @@ class NatNetClientNode(Node):
                 orientation=Quaternion(**dict(zip(["x", "y", "z", "w"], rotation))),
             ),
         )
-        self._publish_pose(pose_msg)
+
+        return pose_msg
+
+    def _get_marker_msg(
+        self,
+        new_id: str,
+        position: Tuple[float, float, float],
+        rotation: Tuple[float, float, float, float],
+    ) -> Marker:
+        marker_msg = Marker(
+            header=Header(
+                frame_id="optitrack_world", stamp=self.get_clock().now().to_msg()
+            ),
+            ns=new_id,
+            id=int(new_id),
+            type=Marker.CUBE,
+            action=Marker.ADD,
+            pose=Pose(
+                position=Point(**dict(zip(["x", "y", "z"], position))),
+                orientation=Quaternion(**dict(zip(["x", "y", "z", "w"], rotation))),
+            ),
+            scale=Vector3(x=0.1, y=0.1, z=0.1),
+            color=ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0),
+            lifetime=DurationMsg(sec=0, nanosec=100000000),  # 0.1 seconds
+        )
+        return marker_msg
+
+    def _update_marker_array(self, maker_msg: Marker):
+        # Check if the marker already exists in the array
+        for i, existing_marker in enumerate(self._markers.markers):
+            existing_marker: Marker
+
+            if existing_marker.id == maker_msg.id:
+                # Update the existing marker
+                self._markers.markers[i] = maker_msg
+                return True  # Marker updated
+
+        # If not found, add the new marker to the array
+        self._markers.markers.append(maker_msg)
+
+    def _publish_marker_array(self):
+        if self._marker_array_publisher.get_subscription_count() > 0:
+            self._marker_array_publisher.publish(self._markers)
+
+    def receive_rigid_body_frame(
+        self,
+        new_id: str,
+        position: Tuple[float, float, float],
+        rotation: Tuple[float, float, float, float],
+    ):
+        # Transform the position and rotation into a PoseStamped message
+        marker_msg = self._get_marker_msg(new_id, position, rotation)
+
+        # Update the marker array with the new marker
+        self._update_marker_array(marker_msg)
+
+        # Publish the marker array
+        self._publish_marker_array()
 
 
 def main(arg=None):
