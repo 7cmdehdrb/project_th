@@ -111,7 +111,7 @@ def request_data_descriptions(s_client: NatNetClient):
 
 
 class NatNetClientNode(Node):
-    def __init__(self, target_id: int):
+    def __init__(self):
         super().__init__("natnet_client_node")
 
         self._markers = MarkerArray()
@@ -144,7 +144,7 @@ class NatNetClientNode(Node):
 
     def _get_marker_msg(
         self,
-        new_id: str,
+        new_id: int,
         position: Tuple[float, float, float],
         rotation: Tuple[float, float, float, float],
     ) -> Marker:
@@ -152,7 +152,7 @@ class NatNetClientNode(Node):
             header=Header(
                 frame_id="optitrack_world", stamp=self.get_clock().now().to_msg()
             ),
-            ns=new_id,
+            ns=str(new_id),
             id=int(new_id),
             type=Marker.CUBE,
             action=Marker.ADD,
@@ -160,7 +160,7 @@ class NatNetClientNode(Node):
                 position=Point(**dict(zip(["x", "y", "z"], position))),
                 orientation=Quaternion(**dict(zip(["x", "y", "z", "w"], rotation))),
             ),
-            scale=Vector3(x=0.1, y=0.1, z=0.1),
+            scale=Vector3(x=0.5, y=0.5, z=0.1),
             color=ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0),
             lifetime=DurationMsg(sec=0, nanosec=100000000),  # 0.1 seconds
         )
@@ -185,7 +185,7 @@ class NatNetClientNode(Node):
 
     def receive_rigid_body_frame(
         self,
-        new_id: str,
+        new_id: int,
         position: Tuple[float, float, float],
         rotation: Tuple[float, float, float, float],
     ):
@@ -202,7 +202,7 @@ class NatNetClientNode(Node):
 def main(arg=None):
     rclpy.init(args=arg)
 
-    node = NatNetClientNode(target_id=1)
+    node = NatNetClientNode()
 
     # Spin in a separate thread
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
@@ -226,8 +226,16 @@ def main(arg=None):
     streaming_client.set_server_address(optionsDict["serverAddress"])
     streaming_client.run(optionsDict["stream_type"])
 
+    hz = 30.0  # Frequency of publishing markers
+    rate = node.create_rate(hz)
+
+    while rclpy.ok():
+        rate.sleep()
+
     node.destroy_node()
     rclpy.shutdown()
+
+    thread.join()
 
 
 if __name__ == "__main__":
