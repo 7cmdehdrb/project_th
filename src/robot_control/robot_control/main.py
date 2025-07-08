@@ -676,7 +676,8 @@ class MainNode(Node):
             Status.WAITING: self._waiting,
             Status.PLANNING: self._planning,
             Status.EXECUTING: self._executing,
-            Status.SWEEPING: self._sweeping_velocity,
+            # Status.SWEEPING: self._sweeping_velocity,
+            Status.SWEEPING: self._sweeping,
             Status.HOMING: self._homing,
             Status.END: self._end,
             Status.TEST: self._test,  # Test state for debugging
@@ -956,6 +957,7 @@ class MainNode(Node):
             end_effector="gripper_link",
             joint_states=self._joint_state_manager.data,
         )
+        print(f"Trajectory: {traj}")
 
         last_traj: JointTrajectoryPoint = traj.joint_trajectory.points[-1]
 
@@ -1119,7 +1121,7 @@ class MainNode(Node):
         path, direction = self._path_tracking_manager.linear_path(
             x_start=object_pose.pose.position.x,
             y_start=object_pose.pose.position.y,
-            x_offset=-0.05,  # Offset for the linear path
+            x_offset=-0.00,  # Offset for the linear path
             y_offset=-0.25,  # Offset for the linear path
             num_points=100,  # Number of points in the path
         )
