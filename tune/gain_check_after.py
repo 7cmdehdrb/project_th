@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
 
-merged_csv = "/home/min/7cmdehdrb/project_th/gain_tuner_merged102.csv"
+merged_csv = "/home/min/7cmdehdrb/project_th/tune/gain_tuner_merged102.csv"
 merged_df = pd.read_csv(merged_csv)
 
 merged_df = merged_df[(merged_df["ShoulderLift"] < 0.05)]

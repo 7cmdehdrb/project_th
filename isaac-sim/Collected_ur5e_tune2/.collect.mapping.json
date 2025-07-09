@@ -1,0 +1,29 @@
+{
+    "version": "1.0",
+    "file_records": [
+        {
+            "source_url": "https://omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wood/Ash.mdl",
+            "source_hash": "955834e48b1062261fa982082d9015328bf4ea88",
+            "target_url": "./omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wood/Ash.mdl",
+            "target_hash": "88efa5409ca5384e957e597e153151e1b0c3da62"
+        },
+        {
+            "source_url": "https://omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wood/Ash/Ash_BaseColor.png",
+            "source_hash": "f1493a9c22cbb468fe8bf21383a94355fb5b8ce8",
+            "target_url": "./omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wood/Ash/Ash_BaseColor.png",
+            "target_hash": "a87ad20c8b3554496a2c0c8978f600ebcf6b631d"
+        },
+        {
+            "source_url": "https://omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wood/Ash/Ash_ORM.png",
+            "source_hash": "e0f74ba28068cc44be88a52de5bf08c2c0db3831",
+            "target_url": "./omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wood/Ash/Ash_ORM.png",
+            "target_hash": "5526dd4910bffeb14b9d45c932e93601a4769ffb"
+        },
+        {
+            "source_url": "https://omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wood/Ash/Ash_Normal.png",
+            "source_hash": "6814b25f9794652b9f0698acbd0af850bebe065c",
+            "target_url": "./omniverse-content-production.s3.us-west-2.amazonaws.com/Materials/Base/Wood/Ash/Ash_Normal.png",
+            "target_hash": "fc9869a579f29b975b7440b444ba11544b9601cd"
+        }
+    ]
+}

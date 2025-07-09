@@ -16,6 +16,7 @@ from visualization_msgs.msg import *
 from tf2_ros import *
 
 # Python
+import os
 import numpy as np
 from base_package.manager import SimpleSubscriberManager
 
@@ -23,6 +24,10 @@ from base_package.manager import SimpleSubscriberManager
 class TextLogger(object):
     def __init__(self, filename: str):
         self._filename = filename
+
+        if os.path.exists(self._filename):
+            raise FileExistsError(f"File '{self._filename}' already exists.")
+
         self._file = open(self._filename, "w")
 
         header_T = "Time,Stiffness,Damping,"
@@ -45,16 +50,16 @@ class RTDELogger(Node):
     def __init__(self):
         super().__init__("rtde_logger")
 
-        self._text_logger = TextLogger("rtde_log_shoulder_lift.csv")
+        self._text_logger = TextLogger("rtde_log_wrist3_zz.csv")
 
         self._real_joint_state_subscriber = SimpleSubscriberManager(
             self, "/joint_states", JointState
         )
         self._sim_joint_state_subscriber = SimpleSubscriberManager(
-            self, "/issac_sim/joint_states", JointState
+            self, "/isaac_sim/joint_states", JointState
         )
         self._control_command_subscriber = SimpleSubscriberManager(
-            self, "/issac_sim/joint_control", JointState
+            self, "/isaac_sim/joint_control", JointState
         )
         self._stiffness_subscriber = SimpleSubscriberManager(
             self, "/isaac_sim/stiffness", Float32MultiArray
@@ -115,6 +120,14 @@ class RTDELogger(Node):
         sim_joint_velocity_text = f"{sim_joint_data.velocity[5]}, {sim_joint_data.velocity[0]}, {sim_joint_data.velocity[1]}, {sim_joint_data.velocity[2]}, {sim_joint_data.velocity[3]}, {sim_joint_data.velocity[4]}"
         control_command_text = f"{control_command_data.position[0]}, {control_command_data.position[1]}, {control_command_data.position[2]}, {control_command_data.position[3]}, {control_command_data.position[4]}, {control_command_data.position[5]}"
 
+        current_stiffness = int(stiffness_data.data[0])
+        current_damping = int(damping_data.data[0])
+        if current_stiffness == -1 and current_damping == -1:
+            self.get_logger().info("Received end signal, closing logger.")
+            self._text_logger.close()
+            self.destroy_node()
+            rclpy.shutdown()
+
         log_msg = (
             time_text
             + ", "
@@ -128,15 +141,12 @@ class RTDELogger(Node):
             + ", "
             + control_command_text
         ).replace(" ", "")
-        self._text_logger.log(log_msg)
 
-        if int(stiffness_data.data[0]) == 1500 and int(damping_data.data[0]) == 150:
-            self.get_logger().info("Logging complete. Closing file.")
-            self._text_logger.close()
-            rclpy.shutdown()
+        self._text_logger.log(log_msg)
 
 
 def main():
+
     rclpy.init(args=None)
 
     import threading

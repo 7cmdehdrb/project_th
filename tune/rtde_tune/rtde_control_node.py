@@ -109,17 +109,32 @@ class RTDEControlNode(Node):
             "/home/min/7cmdehdrb/project_th/data[2by2].csv"
         )
 
+        self._loop_once = True  # Flag to control the loop execution
         self._clockwise = True  # Flag to control the direction of the path
-        self._mode = Mode.SHOULDERLIFT  # Default mode
+        self._mode = Mode.WRIST3  # Default mode
 
+        # # Scenario: 0
+        # # Define stiffness and damping values
+        # self._stiffnesses = np.linspace(600.0, 1500.0, num=20)
+        # self._dampings = np.linspace(40.0, 100.0, num=20)
+
+        # Scenario: 1
         # Define stiffness and damping values
-        self._stiffnesses = np.linspace(600.0, 1500.0, num=20)
-        self._dampings = np.linspace(40.0, 100.0, num=20)
+        self._stiffnesses = np.linspace(600.0, 1200.0, num=10)
+        self._dampings = np.linspace(0.0, 100.0, num=10)
+
+        # # MAX
+        # self._stiffnesses = np.linspace(1405.26318359375, 1405.26318359375, num=1)
+        # self._dampings = np.linspace(52.6315803527832, 52.6315803527832, num=1)
+
+        # # MIN
+        # self._stiffnesses = np.linspace(884.2105102539062, 884.2105102539062, num=1)
+        # self._dampings = np.linspace(77.89473724365234, 77.89473724365234, num=1)
 
         # Create publishers
         self._joint_state_publisher = self.create_publisher(
             JointState,
-            "/issac_sim/joint_control",
+            "/isaac_sim/joint_control",
             qos_profile=qos_profile_system_default,
         )
         self._damping_publisher = self.create_publisher(
@@ -140,8 +155,17 @@ class RTDEControlNode(Node):
 
         rate = self.create_rate(100.0)
 
-        for stiffness in self._stiffnesses:
-            for damping in self._dampings:
+        for i, damping in enumerate(self._dampings):
+            if i % 2 == 0:
+                stiffnesses_iter = self._stiffnesses
+            else:
+                stiffnesses_iter = self._stiffnesses[::-1]
+
+            for stiffness in stiffnesses_iter:
+
+                self.get_logger().info(
+                    f"Starting control loop with stiffness: {stiffness}, damping: {damping}"
+                )
 
                 while rclpy.ok():
                     joint_states: JointState = self._joint_state_subscriber.data
@@ -202,6 +226,20 @@ class RTDEControlNode(Node):
 
                     rate.sleep()
 
+        if self._loop_once:
+            self.get_logger().info("Loop completed once, shutting down.")
+
+            for _ in range(30):
+                stiffness_msg = Float32MultiArray(data=[-1] * 6)
+                damping_msg = Float32MultiArray(data=[-1] * 6)
+
+                self._stiffness_publisher.publish(stiffness_msg)
+                self._damping_publisher.publish(damping_msg)
+
+                rate.sleep()
+
+            rclpy.shutdown()
+
     def run(self):
         rate = self.create_rate(100.0)  # 10 Hz
 
@@ -258,7 +296,6 @@ def main():
 
     while rclpy.ok():
         node.run2()
-        pass
 
     node.destroy_node()
     rclpy.shutdown()
