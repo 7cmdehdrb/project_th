@@ -111,7 +111,7 @@ class RTDEControlNode(Node):
 
         self._loop_once = True  # Flag to control the loop execution
         self._clockwise = True  # Flag to control the direction of the path
-        self._mode = Mode.WRIST3  # Default mode
+        self._mode = Mode.ELBOW  # Default mode
 
         # # Scenario: 0
         # # Define stiffness and damping values
@@ -120,8 +120,8 @@ class RTDEControlNode(Node):
 
         # Scenario: 1
         # Define stiffness and damping values
-        self._stiffnesses = np.linspace(600.0, 1200.0, num=10)
-        self._dampings = np.linspace(0.0, 100.0, num=10)
+        self._stiffnesses = np.linspace(600.0, 1800.0, num=10)
+        self._dampings = np.linspace(30.0, 180.0, num=10)
 
         # # MAX
         # self._stiffnesses = np.linspace(1405.26318359375, 1405.26318359375, num=1)
@@ -186,9 +186,9 @@ class RTDEControlNode(Node):
                         wrist_3,
                     ]
 
-                    control_command[self._mode.value] += np.random.uniform(
-                        0.05, 0.3
-                    ) * (1.0 if self._clockwise else -1.0)
+                    control_command[self._mode.value] += np.random.uniform(0.1, 0.7) * (
+                        1.0 if self._clockwise else -1.0
+                    )
 
                     self._rtde_control.servoJ(
                         control_command,

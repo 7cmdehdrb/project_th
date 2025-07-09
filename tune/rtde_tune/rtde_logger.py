@@ -50,7 +50,7 @@ class RTDELogger(Node):
     def __init__(self):
         super().__init__("rtde_logger")
 
-        self._text_logger = TextLogger("rtde_log_wrist3_zz.csv")
+        self._text_logger = TextLogger("rtde_log_elbow_test2.csv")
 
         self._real_joint_state_subscriber = SimpleSubscriberManager(
             self, "/joint_states", JointState
