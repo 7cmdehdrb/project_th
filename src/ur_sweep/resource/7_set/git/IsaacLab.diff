@@ -1,0 +1,139 @@
+--- git status ---
+HEAD detached at e316b5c8a
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   source/extensions/omni.isaac.lab/omni/isaac/lab/envs/manager_based_env.py
+	modified:   source/extensions/omni.isaac.lab/omni/isaac/lab/managers/action_manager.py
+	modified:   source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/rl_cfg.py
+	modified:   source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/vecenv_wrapper.py
+	modified:   source/standalone/workflows/rsl_rl/play.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/source/extensions/omni.isaac.lab/omni/isaac/lab/envs/manager_based_env.py b/source/extensions/omni.isaac.lab/omni/isaac/lab/envs/manager_based_env.py
+index a84314bc8..c635f7c40 100644
+--- a/source/extensions/omni.isaac.lab/omni/isaac/lab/envs/manager_based_env.py
++++ b/source/extensions/omni.isaac.lab/omni/isaac/lab/envs/manager_based_env.py
+@@ -80,9 +80,6 @@ class ManagerBasedEnv:
+         # initialize internal variables
+         self._is_closed = False
+ 
+-        # initialize target_object id
+-        self.target_id = 0
+-
+         # set the seed for the environment
+         if self.cfg.seed is not None:
+             self.cfg.seed = self.seed(self.cfg.seed)
+@@ -133,7 +130,10 @@ class ManagerBasedEnv:
+             self.viewport_camera_controller = ViewportCameraController(self, self.cfg.viewer)
+         else:
+             self.viewport_camera_controller = None
+-
++        # initialize target_object id
++        self.target_id = torch.zeros((self.scene.num_envs, 1), device=self.device)
++        self.target_width = torch.zeros((self.scene.num_envs, 1), device=self.device)
++        
+         # play the simulator to activate physics handles
+         # note: this activates the physics simulation view that exposes TensorAPIs
+         # note: when started in extension mode, first call sim.reset_async() and then initialize the managers
+diff --git a/source/extensions/omni.isaac.lab/omni/isaac/lab/managers/action_manager.py b/source/extensions/omni.isaac.lab/omni/isaac/lab/managers/action_manager.py
+index 057c2b17a..8ad9fdc65 100644
+--- a/source/extensions/omni.isaac.lab/omni/isaac/lab/managers/action_manager.py
++++ b/source/extensions/omni.isaac.lab/omni/isaac/lab/managers/action_manager.py
+@@ -330,7 +330,7 @@ class ActionManager(ManagerBase):
+         # store the input actions
+         self._prev_action[:] = self._action
+         self._action[:] = action.to(self.device)
+-        self._action = torch.clip(self._action, -3.14, 3.14)
++        # self._action = torch.clip(self._action, -0.01, 0.01)
+ 
+         # split the actions and apply to each tensor
+         idx = 0
+diff --git a/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/rl_cfg.py b/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/rl_cfg.py
+index 8bf54f019..15387d4be 100644
+--- a/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/rl_cfg.py
++++ b/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/rl_cfg.py
+@@ -98,6 +98,13 @@ class RslRlOnPolicyRunnerCfg:
+     algorithm: RslRlPpoAlgorithmCfg = MISSING
+     """The algorithm configuration."""
+ 
++    clip_actions: float | None = None
++    """The clipping value for actions. If ``None``, then no clipping is done.
++
++    .. note::
++        This clipping is performed inside the :class:`RslRlVecEnvWrapper` wrapper.
++    """
++
+     ##
+     # Checkpointing parameters
+     ##
+diff --git a/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/vecenv_wrapper.py b/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/vecenv_wrapper.py
+index f6147ea9d..4f55e8422 100644
+--- a/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/vecenv_wrapper.py
++++ b/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/utils/wrappers/rsl_rl/vecenv_wrapper.py
+@@ -43,7 +43,7 @@ class RslRlVecEnvWrapper(VecEnv):
+         https://github.com/leggedrobotics/rsl_rl/blob/master/rsl_rl/env/vec_env.py
+     """
+ 
+-    def __init__(self, env: ManagerBasedRLEnv | DirectRLEnv):
++    def __init__(self, env: ManagerBasedRLEnv | DirectRLEnv, clip_actions: float | None = None):
+         """Initializes the wrapper.
+ 
+         Note:
+@@ -63,6 +63,7 @@ class RslRlVecEnvWrapper(VecEnv):
+             )
+         # initialize the wrapper
+         self.env = env
++        self.clip_actions = clip_actions
+         # store information required by wrapper
+         self.num_envs = self.unwrapped.num_envs
+         self.device = self.unwrapped.device
+@@ -173,6 +174,10 @@ class RslRlVecEnvWrapper(VecEnv):
+         return obs_dict["policy"], {"observations": obs_dict}
+ 
+     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
++        # clip actions
++        if self.clip_actions is not None:
++            actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
++
+         # record step information
+         obs_dict, rew, terminated, truncated, extras = self.env.step(actions)
+         # compute dones for compatibility with RSL-RL
+@@ -190,3 +195,17 @@ class RslRlVecEnvWrapper(VecEnv):
+ 
+     def close(self):  # noqa: D102
+         return self.env.close()
++    
++    def _modify_action_space(self):
++        """Modifies the action space to the clip range."""
++        if self.clip_actions is None:
++            return
++
++        # modify the action space to the clip range
++        # note: this is only possible for the box action space. we need to change it in the future for other action spaces.
++        self.env.unwrapped.single_action_space = gym.spaces.Box(
++            low=-self.clip_actions, high=self.clip_actions, shape=(self.num_actions,)
++        )
++        self.env.unwrapped.action_space = gym.vector.utils.batch_space(
++            self.env.unwrapped.single_action_space, self.num_envs
++        )
+diff --git a/source/standalone/workflows/rsl_rl/play.py b/source/standalone/workflows/rsl_rl/play.py
+index 6a763714e..b0a4860ad 100644
+--- a/source/standalone/workflows/rsl_rl/play.py
++++ b/source/standalone/workflows/rsl_rl/play.py
+@@ -122,8 +122,12 @@ def main():
+         with torch.inference_mode():
+             # agent stepping
+             actions = policy(obs)
++
++            # print(f"obs: {obs}")
++            # print(f"action: {actions}")
+             # env stepping
+             obs, _, _, _ = env.step(actions)
++            # print(f"observation: {obs}")
+         if args_cli.video:
+             timestep += 1
+             # Exit the play loop after recording one video

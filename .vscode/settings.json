@@ -5,6 +5,7 @@
         "./install/object_tracker/lib/python3.10/site-packages",
         "./install/path_planner/lib/python3.10/site-packages",
         "./install/robot_control/lib/python3.10/site-packages",
+        "./install/ur_sweep/lib/python3.10/site-packages",
     ],
     "python.autoComplete.extraPaths": [
         "./install/base_package/lib/python3.10/site-packages",
@@ -12,6 +13,7 @@
         "./install/object_tracker/lib/python3.10/site-packages",
         "./install/path_planner/lib/python3.10/site-packages",
         "./install/robot_control/lib/python3.10/site-packages",
+        "./install/ur_sweep/lib/python3.10/site-packages",
     ],
     "cmake.sourceDirectory": "/home/min/7cmdehdrb/project_th/src/custom_msgs",
 }

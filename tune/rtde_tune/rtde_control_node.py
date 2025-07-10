@@ -186,9 +186,9 @@ class RTDEControlNode(Node):
                         wrist_3,
                     ]
 
-                    control_command[self._mode.value] += np.random.uniform(0.1, 0.7) * (
-                        1.0 if self._clockwise else -1.0
-                    )
+                    control_command[self._mode.value] += np.random.uniform(
+                        0.1, np.deg2rad(45.0)
+                    ) * (1.0 if self._clockwise else -1.0)
 
                     self._rtde_control.servoJ(
                         control_command,
@@ -216,10 +216,10 @@ class RTDEControlNode(Node):
 
                     if (
                         self._clockwise
-                        and np.rad2deg(control_command[self._mode.value]) > 90.0
+                        and np.rad2deg(control_command[self._mode.value]) > 170.0
                     ) or (
                         not self._clockwise
-                        and np.rad2deg(control_command[self._mode.value]) < -90.0
+                        and np.rad2deg(control_command[self._mode.value]) < -170.0
                     ):
                         self._clockwise = not self._clockwise
                         break
