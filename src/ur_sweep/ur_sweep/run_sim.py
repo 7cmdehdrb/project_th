@@ -41,53 +41,23 @@ from ur_sweep.ur_reach_policy import URReachPolicy
 import socket
 import struct
 
+import sys
+import os
+import socket
+import struct
 
-class SocketServer:
-    def __init__(self, host="127.0.0.1", port=9000):
-        self.host = host
-        self.port = port
-        self.header = b"HEAD"
-        self.footer = b"TAIL"
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client_conn = None
+from omni.isaac.kit import SimulationApp
 
-    def start(self):
-        self.server_socket.bind((self.host, self.port))
-        self.server_socket.listen(1)
-        print(f"[Server] Listening on {self.host}:{self.port} ...")
-        self.client_conn, addr = self.server_socket.accept()
-        print(f"[Server] Connection established with {addr}")
 
-    def send(self, float_array):
-        if len(float_array) != 12:
-            raise ValueError("Array must be of length 12.")
-        payload = struct.pack("!12f", *float_array)
-        packet = self.header + payload + self.footer
-        self.client_conn.sendall(packet)
-        # print(f"[Server] Sent: {float_array}")
-
-    def receive(self):
-        expected_size = 56  # 4 + 48 + 4
-        packet = self.client_conn.recv(expected_size)
-        if packet.startswith(self.header) and packet.endswith(self.footer):
-            payload = packet[4:-4]
-            data = struct.unpack("!12f", payload)
-            # print(f"[Server] Received: {data}")
-            return data
-        else:
-            print("[Server] Invalid packet received.")
-            return None
+from omni.isaac.core.utils.stage import open_stage
+from omni.isaac.core import World
+from omni.isaac.core.prims import XFormPrim
+from pxr import UsdPhysics, Usd, UsdGeom
 
 
 class EEFManager(object):
     def __init__(self, node: Node):
         self._node = node
-
-        self._joint_states_manager = SimpleSubscriberManager(
-            node=self._node,
-            topic_name="/joint_states",
-            msg_type=JointState,
-        )
 
         self._dh_params = [
             (0, 0.1625, np.pi / 2),
@@ -114,9 +84,6 @@ class EEFManager(object):
         )
 
     def forward_kinematics(self, joint_states: JointState | None) -> np.ndarray:
-        if joint_states is None:
-            joint_states: JointState = self._joint_states_manager.data
-
         if joint_states is None:
             self._node.get_logger().warn("JointState data not available yet.")
             return None
@@ -165,64 +132,35 @@ class EEFManager(object):
             ]
         )
 
+    @staticmethod
+    def reorder_joint_states(joint_states: JointState) -> JointState:
+        """
+        Reorder joint states to match the UR5e DH parameter order.
 
-def reorder_joint_states(joint_states: JointState) -> JointState:
-    """
-    Reorder joint states to match the UR5e DH parameter order.
+        Args:
+            joint_states (JointState): Original joint states.
 
-    Args:
-        joint_states (JointState): Original joint states.
+        Returns:
+            JointState: Reordered joint states.
+        """
+        reordered_positions = [
+            joint_states.position[5],  # shoulder_pan_joint
+            joint_states.position[0],  # shoulder_lift_joint
+            joint_states.position[1],  # elbow_joint
+            joint_states.position[2],  # wrist_1_joint
+            joint_states.position[3],  # wrist_2_joint
+            joint_states.position[4],  # wrist_3_joint
+        ]
+        reordered_velocities = [
+            joint_states.velocity[5],
+            joint_states.velocity[0],
+            joint_states.velocity[1],
+            joint_states.velocity[2],
+            joint_states.velocity[3],
+            joint_states.velocity[4],
+        ]
 
-    Returns:
-        JointState: Reordered joint states.
-    """
-    reordered_positions = [
-        joint_states.position[5],  # shoulder_pan_joint
-        joint_states.position[0],  # shoulder_lift_joint
-        joint_states.position[1],  # elbow_joint
-        joint_states.position[2],  # wrist_1_joint
-        joint_states.position[3],  # wrist_2_joint
-        joint_states.position[4],  # wrist_3_joint
-    ]
-    reordered_velocities = [
-        joint_states.velocity[5],
-        joint_states.velocity[0],
-        joint_states.velocity[1],
-        joint_states.velocity[2],
-        joint_states.velocity[3],
-        joint_states.velocity[4],
-    ]
-
-    return JointState(position=reordered_positions, velocity=reordered_velocities)
-
-
-def interpolate_joint_states(
-    joint_states: JointState,
-    current_time: Time,
-):
-
-    msg_time = joint_states.header.stamp
-
-    dsec = current_time.to_msg().sec - msg_time.sec
-    dnanosec = current_time.to_msg().nanosec - msg_time.nanosec
-
-    dt = dsec + dnanosec * 1e-9  # Convert to seconds
-
-    if dt < 0.01:
-        # If the time difference is too small, return the original joint states
-        return joint_states
-
-    positions = np.array(joint_states.position)
-    velocities = np.array(joint_states.velocity)
-
-    interpolated_positions = positions + velocities * dt
-
-    return JointState(
-        header=joint_states.header,
-        position=interpolated_positions.tolist(),
-        velocity=velocities.tolist(),
-        effort=joint_states.effort,
-    )
+        return JointState(position=reordered_positions, velocity=reordered_velocities)
 
 
 class ReachPolicy(Node):
@@ -282,143 +220,101 @@ class ReachPolicy(Node):
             yaml_file="/home/min/7cmdehdrb/project_th/src/ur_sweep/resource/7_set/params/env.yaml",  # Specify the path to your model and YAML file
         )
 
-        self._socket_server = SocketServer(host="0.0.0.0", port=9000)
+        self._prim_paths = [
+            "/World/ur5e/base_link_inertia/shoulder_pan_joint",
+            "/World/ur5e/shoulder_link/shoulder_lift_joint",
+            "/World/ur5e/upper_arm_link/elbow_joint",
+            "/World/ur5e/forearm_link/wrist_1_joint",
+            "/World/ur5e/wrist_1_link/wrist_2_joint",
+            "/World/ur5e/wrist_2_link/wrist_3_joint",
+        ]
+        self._prims = [XFormPrim(path) for path in self._prim_paths]
 
-        # RTDE
-        IP = "192.168.56.101"
-        self._rtde_c = RTDEControlInterface(IP)
-        self._rtde_r = RTDEReceiveInterface(IP)
+        self._stiffness_attrs = [
+            prim.prim.GetAttribute("drive:angular:physics:stiffness")
+            for prim in self._prims
+        ]
+        self._damping_attrs = [
+            prim.prim.GetAttribute("drive:angular:physics:damping")
+            for prim in self._prims
+        ]
+
+        self._target_positions_attrs = [
+            prim.prim.GetAttribute("drive:angular:physics:targetPosition")
+            for prim in self._prims
+        ]
+        self._currnet_positions_attrs = [
+            prim.prim.GetAttribute("state:angular:physics:position")
+            for prim in self._prims
+        ]
+        self._current_velocities_attrs = [
+            prim.prim.GetAttribute("state:angular:physics:velocity")
+            for prim in self._prims
+        ]
 
         self._initialized = False
-        self._tf_manager = TransformManager(node=self)
         self._eef_manager = EEFManager(node=self)
-        self._sim_object_manager = SimpleSubscriberManager(
-            node=self,
-            topic_name="/isaac_sim/pose/mug_a",
-            msg_type=PoseStamped,
-        )
-        self._joint_state_manager = SimpleSubscriberManager(
-            node=self,
-            topic_name="/isaac_sim/joint_states",  # /isaac_sim/joint_states
-            msg_type=JointState,
-        )
-        self._control_joint_states_publisher = self.create_publisher(
-            JointState,
-            "/isaac_sim/joint_control",
-            qos_profile=qos_profile_system_default,
-        )
 
-        self._damping_publisher = self.create_publisher(
-            Float32MultiArray,
-            "isaac_sim/damping",
-            qos_profile=qos_profile_system_default,
-        )
-        self._stiffness_publisher = self.create_publisher(
-            Float32MultiArray,
-            "isaac_sim/stiffness",
-            qos_profile=qos_profile_system_default,
-        )
-        self._cmd = [0.0] * 6
-
-        self._socket_server.start()
         self._reset()
 
     def run(self):
-        send_data = list(self._cmd) + [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self._socket_server.send(send_data)
-        print(f"Send command: {send_data}")
-        received_data = self._socket_server.receive()
+        current_positions = [attr.Get() for attr in self._currnet_positions_attrs]
+        current_velocities = [attr.Get() for attr in self._current_velocities_attrs]
 
-        if received_data is None:
-            error_msg = "Failed to receive data from socket server. Skipping iteration."
-            raise ValueError(error_msg)
-
-        received_data = np.deg2rad(np.array(received_data, dtype=np.float32))
-        position_data = received_data[:6]
-        velocity_data = received_data[6:12]
-
-        print(f"Received position data: {position_data}")
-        print(f"Received velocity data: {velocity_data}")
-
+        # Get the current joint states
         joint_states = JointState(
+            header=Header(
+                stamp=self.get_clock().now().to_msg(),
+                frame_id="base_link",
+            ),
             position=[
-                position_data[1],
-                position_data[2],
-                position_data[3],
-                position_data[4],
-                position_data[5],
-                position_data[0],
+                current_positions[1],
+                current_positions[2],
+                current_positions[3],
+                current_positions[4],
+                current_positions[5],
+                current_positions[0],
             ],
             velocity=[
-                velocity_data[1],
-                velocity_data[2],
-                velocity_data[3],
-                velocity_data[4],
-                velocity_data[5],
-                velocity_data[0],
+                current_velocities[1],
+                current_velocities[2],
+                current_velocities[3],
+                current_velocities[4],
+                current_velocities[5],
+                current_velocities[0],
             ],
             effort=[0.0] * 6,  # Effort is not used in this example
         )
-
-        # joint_states: JointState = self._joint_state_manager.data
-        # if self._joint_state_manager.data is None:
-        #     error_msg = "JointState data not available yet. Skipping iteration."
-        #     raise ValueError(error_msg)
 
         tcp_pose = self._eef_manager.forward_kinematics(joint_states=joint_states)
         if tcp_pose is None:
             error_msg = "TCP pose is not available. Skipping servo command."
             raise ValueError(error_msg)
 
-        self._stiffness_publisher.publish(
-            Float32MultiArray(
-                data=[600.0, 1000.0, 1000.0, 1000.0, 600.0, 600.0]
-            )  # [600.0, 1000.0, 1000.0, 1000.0, 600.0, 600.0]
-        )
-        self._damping_publisher.publish(
-            Float32MultiArray(
-                data=[40.0, 100.0, 100.0, 100.0, 70.0, 70.0]
-            )  # [40.0, 100.0, 100.0, 100.0, 70.0, 70.0]
-        )
+        # Set the stiffness and damping for the joints
+        stiffness_values = [600.0, 1000.0, 1000.0, 1000.0, 600.0, 600.0]
+        damping_values = [40.0, 100.0, 100.0, 100.0, 70.0, 70.0]
+        for attr, stiff, damp in zip(
+            self._stiffness_attrs, stiffness_values, self._damping_attrs, damping_values
+        ):
+            attr.Set(stiff)
+            damp.Set(damp)
 
         # STEP 1: Get the current joint positions and velocities
-        # current_pos = self._rtde_r.getActualQ()
-        # current_vel = self._rtde_r.getActualQd()
-        joint_states: JointState = reorder_joint_states(joint_states)
+        joint_states: JointState = EEFManager.reorder_joint_states(joint_states)
 
         current_pos = joint_states.position
         current_vel = joint_states.velocity
 
         # STEP 2: Get the current TCP pose in base_link frame
         # Update the robot's joint state
-        self.robot.update_joint_state(temp, current_vel)
+        self.robot.update_joint_state(current_pos, current_vel)
         # Update the robot's TCP state
 
         self.robot.update_tcp_state(pose=tcp_pose)  # tcp_pose
 
-        # Update the object pose in the simulation
-        object_pose: PoseStamped = self._sim_object_manager.data
-        if object_pose is None:
-            error_msg = "Object pose data not available yet. Skipping iteration."
-            raise ValueError(error_msg)
-
-        self.robot.update_target_state(
-            pos=[
-                object_pose.pose.position.x,
-                object_pose.pose.position.y,
-                object_pose.pose.position.z,
-            ]
-        )
-        if self._initialized is False:  # self._initialized is False:
-            self.robot.update_goal_state(
-                goal=[
-                    object_pose.pose.position.x,
-                    object_pose.pose.position.y - 0.18,
-                    object_pose.pose.position.z,
-                ]
-            )
-            print("Goal position initialized to:", self.robot.goal_pos)
-            self._initialized = True
+        self.robot.update_target_state(pos=[0.722, -0.153, 0.27])
+        self.robot.update_goal_state(goal=[0.722, -0.153 - 0.18, 0.27])
 
         joint_pos = self.robot.forward(None)
 
@@ -436,19 +332,13 @@ class ReachPolicy(Node):
             target_pos = self._map_joint_angle(pos, i)
             cmd[i] = target_pos
 
-        t_start = self._rtde_c.initPeriod()
-
-        self._rtde_c.servoJ(cmd, 0.1, 0.2, 1.0 / 100.0, 0.2, 300)
-        # self._control_joint_states_publisher.publish(JointState(position=cmd))
+        # Set Target Positions
+        for i, target_pos in enumerate(cmd):
+            self._target_positions_attrs[i].Set(target_pos)
 
         self.get_logger().info(
             f"TCP Position: {tcp_pose[0]:.3f}, {tcp_pose[1]:.3f}, {tcp_pose[2]:.3f}"
         )
-        self._cmd = list(cmd)
-
-        # self.get_logger().info(f"Sending servo command: {cmd}")
-
-        self._rtde_c.waitPeriod(t_start)
 
     def _map_joint_angle(self, pos: float, index: int) -> float:
         """
@@ -482,37 +372,26 @@ class ReachPolicy(Node):
         return mapped
 
     def _reset(self):
-        for _ in range(10):
-            send_data = list(self.robot.default_pos[:6]) + [
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-            ]
-            self._socket_server.send(send_data)
-            time.sleep(0.01)
-
-        self._rtde_c.moveJ(self.robot.default_pos[:6])
-        self._rtde_c.stopJ()
-
         self.get_logger().info("Resetting robot to default position...")
 
-        # for _ in range(10):
-        #     self._control_joint_states_publisher.publish(
-        #         JointState(position=self.robot.default_pos[:6])
-        #     )
+        default_joint = self.robot.default_pos[:6].tolist()
+        for _ in range(10):
+            for i, target_pos in enumerate(default_joint):
+                self._target_positions_attrs[i].Set(target_pos)
 
         time.sleep(1)
 
     def stop(self):
-        self._rtde_c.stopJ()
         time.sleep(1)
 
 
 def main(args=None):
     rclpy.init(args=args)
+
+    # Start Isaac Sim app
+    simulation_app = SimulationApp(
+        {"headless": False}
+    )  # Set headless=True to run without GUI
 
     node = ReachPolicy()
 
