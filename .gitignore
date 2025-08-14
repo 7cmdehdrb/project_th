@@ -395,3 +395,6 @@ log/
 
 test/
 urdf_files_dataset/
+
+isaac-sim/
+src/ur_sweep
